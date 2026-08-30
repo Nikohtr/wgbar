@@ -4,21 +4,39 @@
 import Cocoa
 import ServiceManagement
 
-// Homebrew lives in /opt/homebrew on Apple silicon and /usr/local on Intel.
-let brewPrefix = ["/opt/homebrew", "/usr/local"]
-    .first { FileManager.default.fileExists(atPath: "\($0)/bin/wg-quick") } ?? "/opt/homebrew"
-let brewBin = "\(brewPrefix)/bin"
-let wgQuick = "\(brewBin)/wg-quick"
-let confDir = "\(brewPrefix)/etc/wireguard"
+let defaults = UserDefaults.standard
+
+/// Where wg-quick may live: Homebrew (Apple silicon / Intel) or MacPorts.
+/// Override with:  defaults write org.wgbar.WGBar wgQuick /path/to/wg-quick
+let wgQuick: String = {
+    if let custom = defaults.string(forKey: "wgQuick"), FileManager.default.isExecutableFile(atPath: custom) { return custom }
+    return ["/opt/homebrew/bin", "/usr/local/bin", "/opt/local/bin"].map { "\($0)/wg-quick" }
+        .first { FileManager.default.isExecutableFile(atPath: $0) } ?? "/opt/homebrew/bin/wg-quick"
+}()
+let brewBin = (wgQuick as NSString).deletingLastPathComponent
+
+/// Folders where tunnel configs are looked for, in order.
+let defaultConfDirs = ["/opt/homebrew/etc/wireguard", "/usr/local/etc/wireguard",
+                       "/opt/local/etc/wireguard", "/etc/wireguard"]
+
+func confNames(in dir: String) -> [String] {
+    let names = (try? FileManager.default.contentsOfDirectory(atPath: dir)) ?? []
+    return names.filter { $0.hasSuffix(".conf") }.map { String($0.dropLast(5)) }.sorted()
+}
+
+/// The config folder in use: the user's choice (menu "Config Folder…" or
+/// `defaults write org.wgbar.WGBar confDir /path`), else the first default folder
+/// that has configs, else the first that exists.
+var confDir: String {
+    if let custom = defaults.string(forKey: "confDir"), !custom.isEmpty { return custom }
+    return defaultConfDirs.first { !confNames(in: $0).isEmpty }
+        ?? defaultConfDirs.first { FileManager.default.fileExists(atPath: $0) }
+        ?? defaultConfDirs[0]
+}
 
 func confPath(_ tunnel: String) -> String { "\(confDir)/\(tunnel).conf" }
 func runFile(_ tunnel: String)  -> String { "/var/run/wireguard/\(tunnel).name" }
-
-/// Tunnel names, taken from the *.conf files wg-quick knows about.
-func availableTunnels() -> [String] {
-    let names = (try? FileManager.default.contentsOfDirectory(atPath: confDir)) ?? []
-    return names.filter { $0.hasSuffix(".conf") }.map { String($0.dropLast(5)) }.sorted()
-}
+func availableTunnels() -> [String] { confNames(in: confDir) }
 
 struct CmdResult { let status: Int32; let output: String }
 
@@ -43,12 +61,13 @@ func run(_ exe: String, _ args: [String]) -> CmdResult {
 /// Bring the tunnel up or down. Returns an error message, or nil on success/cancel.
 func wgQuick(_ action: String, _ tunnel: String) -> String? {
     // 1. Passwordless sudo, if a sudoers rule allows it (see sudoers.sh).
-    let r = run("/usr/bin/sudo", ["-n", wgQuick, action, tunnel])
+    let conf = confPath(tunnel)
+    let r = run("/usr/bin/sudo", ["-n", wgQuick, action, conf])
     if r.status == 0 { return nil }
     if !r.output.contains("password") { return r.output }   // a real wg-quick failure
 
     // 2. Otherwise the standard macOS administrator dialog (supports Touch ID).
-    let shell = "PATH=\(brewBin):$PATH \(wgQuick) \(action) \(tunnel)"
+    let shell = "PATH=\(brewBin):$PATH '\(wgQuick)' \(action) '\(conf)'"
     let script = "do shell script \"\(shell)\" with administrator privileges"
     let r2 = run("/usr/bin/osascript", ["-e", script])
     if r2.status == 0 { return nil }
@@ -72,6 +91,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let toggleItem = NSMenuItem(title: "", action: #selector(toggle), keyEquivalent: "")
     private let loginItem  = NSMenuItem(title: "Launch at Login", action: #selector(toggleLogin), keyEquivalent: "")
     private let tunnelItem = NSMenuItem(title: "Tunnel", action: nil, keyEquivalent: "")
+    private let folderItem = NSMenuItem(title: "Config Folder…", action: #selector(chooseFolder), keyEquivalent: "")
     private var tunnel = ""
     private var isUp = false
     private var busy = false
@@ -79,7 +99,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// The tunnel to control: the remembered choice if its config still exists, else the first one found.
     private func resolveTunnel() {
         let all = availableTunnels()
-        let saved = UserDefaults.standard.string(forKey: "tunnel") ?? ""
+        let saved = defaults.string(forKey: "tunnel") ?? ""
         tunnel = all.contains(saved) ? saved : (all.first ?? "")
     }
 
@@ -96,16 +116,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         toggleItem.target = self
         loginItem.target = self
         tunnelItem.submenu = NSMenu()
+        folderItem.target = self
         menu.addItem(statusLine)
         menu.addItem(toggleItem)
         menu.addItem(.separator())
         menu.addItem(tunnelItem)
+        menu.addItem(folderItem)
         menu.addItem(loginItem)
         menu.addItem(.separator())
         menu.addItem(NSMenuItem(title: "Quit WGBar", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
 
         // Register as a login item on first launch; the menu checkbox controls it afterwards.
-        let defaults = UserDefaults.standard
         if !defaults.bool(forKey: "didRegisterLoginItem") {
             try? SMAppService.mainApp.register()
             defaults.set(true, forKey: "didRegisterLoginItem")
@@ -156,6 +177,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             toggleItem.isEnabled = !busy
         }
         rebuildTunnelSubmenu()
+        folderItem.toolTip = confDir
         loginItem.state = SMAppService.mainApp.status == .enabled ? .on : .off
         statusItem.menu = menu
         statusItem.button?.performClick(nil)
@@ -179,7 +201,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc private func selectTunnel(_ sender: NSMenuItem) {
         guard !busy, sender.title != tunnel else { return }
         tunnel = sender.title
-        UserDefaults.standard.set(tunnel, forKey: "tunnel")
+        defaults.set(tunnel, forKey: "tunnel")
         refresh()
     }
 
@@ -205,6 +227,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 if let error { self.showError(action, error) }
             }
         }
+    }
+
+    /// Pick the folder holding <name>.conf files (for setups outside the default locations).
+    @objc private func chooseFolder() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = false
+        panel.directoryURL = URL(fileURLWithPath: confDir)
+        panel.message = "Choose the folder containing your WireGuard .conf files"
+        panel.prompt = "Use Folder"
+        NSApp.activate(ignoringOtherApps: true)
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        let dir = url.path
+        if confNames(in: dir).isEmpty {
+            showError("", "No .conf files found in \(dir)")
+            return
+        }
+        defaults.set(dir, forKey: "confDir")
+        defaults.removeObject(forKey: "tunnel")
+        tunnel = ""
+        refresh()
     }
 
     @objc private func toggleLogin() {

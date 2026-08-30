@@ -9,16 +9,19 @@ if ! xcode-select -p >/dev/null 2>&1; then
   exit 1
 fi
 WG_QUICK=""
-for p in /opt/homebrew /usr/local; do
-  [[ -x "$p/bin/wg-quick" ]] && WG_QUICK="$p/bin/wg-quick" && break
+for p in /opt/homebrew/bin /usr/local/bin /opt/local/bin; do
+  [[ -x "$p/wg-quick" ]] && WG_QUICK="$p/wg-quick" && break
 done
 if [[ -z "$WG_QUICK" ]]; then
   echo "wg-quick not found. Install WireGuard tools with:  brew install wireguard-tools" >&2
   exit 1
 fi
-CONF_DIR="$(dirname "$(dirname "$WG_QUICK")")/etc/wireguard"
-if ! ls "$CONF_DIR"/*.conf >/dev/null 2>&1; then
-  echo "Warning: no tunnel configs found in $CONF_DIR — WGBar will have nothing to toggle until you add one." >&2
+FOUND=""
+for d in /opt/homebrew/etc/wireguard /usr/local/etc/wireguard /opt/local/etc/wireguard /etc/wireguard; do
+  ls "$d"/*.conf >/dev/null 2>&1 && FOUND="$d" && break
+done
+if [[ -z "$FOUND" ]]; then
+  echo "Warning: no tunnel configs found in the usual folders — pick yours via the app's 'Config Folder…' menu item." >&2
 fi
 
 # --- build + install ---------------------------------------------------------

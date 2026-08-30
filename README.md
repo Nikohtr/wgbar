@@ -17,9 +17,10 @@ the other menu bar options are unmaintained.
 - macOS 13 Ventura or newer (Apple silicon or Intel).
 - Xcode Command Line Tools: `xcode-select --install`
 - WireGuard tools from Homebrew: `brew install wireguard-tools`
-- At least one tunnel config in `$(brew --prefix)/etc/wireguard/<name>.conf`
-  (`/opt/homebrew/etc/wireguard/` on Apple silicon, `/usr/local/etc/wireguard/` on Intel).
-  If `wg-quick up <name>` works in Terminal, WGBar will work.
+- At least one tunnel config (`<name>.conf`) in one of the folders WGBar searches:
+  `/opt/homebrew/etc/wireguard`, `/usr/local/etc/wireguard`, `/opt/local/etc/wireguard`
+  (MacPorts) or `/etc/wireguard` — or anywhere else, chosen via **Config Folder…**
+  (see below). If `wg-quick up <name>` works in Terminal, WGBar will work.
 
 ## Install
 
@@ -46,8 +47,9 @@ The app is built on your machine and ad-hoc signed, so there is no Gatekeeper pr
 ```
 
 This writes `/etc/sudoers.d/wgbar` allowing **only your user** to run
-`wg-quick up/down <name>` for the tunnel configs that exist right now, after validating
-it with `visudo -c`. Re-run it after adding a new config. Remove it with
+`wg-quick up/down <path-to-config>` for the tunnel configs that exist right now, after
+validating it with `visudo -c`. Re-run it after adding a config or changing the config
+folder (`./sudoers.sh /some/other/folder` to point it elsewhere). Remove it with
 `sudo rm /etc/sudoers.d/wgbar`.
 
 ## Choosing a tunnel
@@ -55,6 +57,23 @@ it with `visudo -c`. Re-run it after adding a new config. Remove it with
 WGBar picks the first config alphabetically. With more than one config a **Tunnel ▸**
 submenu appears in the right-click menu; the choice is remembered in
 `defaults read org.wgbar.WGBar tunnel`.
+
+## Config folder and unusual setups
+
+WGBar uses the first of `/opt/homebrew/etc/wireguard`, `/usr/local/etc/wireguard`,
+`/opt/local/etc/wireguard`, `/etc/wireguard` that contains `.conf` files. If yours live
+somewhere else, right-click → **Config Folder…** and pick it (hover the item to see the
+folder currently in use). The folder must be listable by your user; WGBar hands
+`wg-quick` the full path to the config, so it works even outside `wg-quick`'s own search
+paths.
+
+Settings can also be set from Terminal (quit and relaunch WGBar afterwards):
+
+```sh
+defaults write org.wgbar.WGBar confDir /path/to/wireguard   # config folder
+defaults write org.wgbar.WGBar wgQuick /path/to/wg-quick    # non-standard wg-quick
+defaults delete org.wgbar.WGBar confDir                     # back to auto-detect
+```
 
 ## Update
 
@@ -75,8 +94,8 @@ Removes the app, its settings, and the sudoers rule (if installed).
 - Tunnel state is read from `/var/run/wireguard/<name>.name`, which `wg-quick` creates
   on `up` and removes on `down`; it is polled every 2 s, so changes made from Terminal
   show up too.
-- Toggling runs `sudo -n wg-quick up|down <name>`; if that fails for lack of a sudoers
-  rule it falls back to `osascript ... with administrator privileges`.
+- Toggling runs `sudo -n wg-quick up|down <folder>/<name>.conf`; if that fails for lack of
+  a sudoers rule it falls back to `osascript ... with administrator privileges`.
 - Login item uses `SMAppService` (hence macOS 13+).
 
 ## Hacking
