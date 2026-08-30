@@ -24,7 +24,7 @@ the other menu bar options are unmaintained.
 ## Install
 
 ```sh
-git clone <this repo> wgbar
+git clone https://github.com/Nikohtr/wgbar.git wgbar
 cd wgbar
 ./install.sh
 ```
