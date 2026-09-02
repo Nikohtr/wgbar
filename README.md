@@ -5,8 +5,9 @@ A tiny macOS menu bar toggle for WireGuard tunnels managed by `wg-quick`
 
 - **Left-click** the shield icon to connect / disconnect.
 - **Right-click** for a menu: status and tunnel address, connect/disconnect,
-  pick a tunnel (when you have more than one), launch at login, check for updates, quit.
-- Icon: `shield.fill` = connected, `shield.slash` = disconnected.
+  pick a tunnel (when you have more than one), connect on demand, launch at login, check for
+  updates, quit.
+- Icon: `shield.fill` = connected, `shield` = armed (on demand), `shield.slash` = disconnected.
 
 It is a few hundred lines of Swift with no dependencies beyond Cocoa (`./test.sh` runs the unit tests). It exists because the
 App Store WireGuard app uses its own tunnel stack (not your `wg-quick` configs), and
@@ -46,11 +47,12 @@ The app is built on your machine and ad-hoc signed, so there is no Gatekeeper pr
 ./sudoers.sh
 ```
 
-This writes `/etc/sudoers.d/wgbar` allowing **only your user** to run
-`wg-quick up/down <path-to-config>` for the tunnel configs that exist right now, after
-validating it with `visudo -c`. Re-run it after adding a config or changing the config
-folder (`./sudoers.sh /some/other/folder` to point it elsewhere). Remove it with
-`sudo rm /etc/sudoers.d/wgbar`.
+This installs the WGBar helper and writes `/etc/sudoers.d/wgbar` allowing **only your user**
+to run the helper and `wg-quick up/down <path-to-config>` for the tunnel configs that exist
+right now, after validating it with `visudo -c`. It refuses config files your user cannot
+already read. Re-run it after adding a config or changing the config folder
+(`./sudoers.sh /some/other/folder` to point it elsewhere). Remove it with
+`sudo rm /etc/sudoers.d/wgbar /usr/local/libexec/wgbar-helper`.
 
 ## Choosing a tunnel
 
@@ -74,6 +76,40 @@ defaults write org.wgbar.WGBar confDir /path/to/wireguard   # config folder
 defaults write org.wgbar.WGBar wgQuick /path/to/wg-quick    # non-standard wg-quick
 defaults delete org.wgbar.WGBar confDir                     # back to auto-detect
 ```
+
+## Connect on demand
+
+Right-click → **Connect on Demand** keeps the selected tunnel *armed*: the WireGuard
+interface and its routes stay up, but the peer has no endpoint and your DNS is untouched.
+The moment something opens a TCP connection to an address inside the tunnel's `AllowedIPs`
+(an RDP session in the Windows App, ssh to an office box, an internal website), WGBar gives
+the peer its endpoint, applies the config's DNS servers, and the connection goes through.
+Thirty seconds after the last such connection closes, the endpoint is removed and DNS is
+restored. Left-click still works: a manual connect stays up until you click again; a manual
+disconnect pauses auto-connect until the current sessions have gone away.
+
+Why armed rather than down: a socket picks its source address when it connects. If the
+tunnel came up only afterwards, the first attempt would leave with your Wi-Fi address and be
+dropped by the WireGuard server. With the interface already present the socket uses the
+tunnel address, wireguard-go holds the packets until the handshake, and nothing fails; the
+session just opens a second or two later.
+
+Requirements:
+
+- A split-tunnel config (specific `AllowedIPs`; the item is disabled for `0.0.0.0/0`).
+- `./sudoers.sh`, which also installs the small root helper WGBar uses for this
+  (`/usr/local/libexec/wgbar-helper`, source in `helper/`). Re-run it after updating WGBar
+  if `install.sh` says the helper is out of date.
+- Remote machines addressed by IP, or by names your normal DNS resolves to their tunnel
+  address. A name that only VPN DNS knows will not trigger the connection yet.
+
+The idle time (30 s by default) is configurable:
+
+```sh
+defaults write org.wgbar.WGBar onDemandIdle 60   # seconds without traffic before disconnecting
+```
+
+Quitting WGBar takes the armed interface down again; relaunching (or login) re-arms it.
 
 ## DNS left behind (and the fix)
 
@@ -125,8 +161,14 @@ Removes the app, its settings, and the sudoers rule (if installed).
 - Toggling runs `sudo -n wg-quick up|down <folder>/<name>.conf`; if that fails for lack of
   a sudoers rule it falls back to `osascript ... with administrator privileges`.
 - Login item uses `SMAppService` (hence macOS 13+).
+- Connect on Demand polls `netstat -n -p tcp` once a second and calls
+  `sudo -n /usr/local/libexec/wgbar-helper arm|connect|disconnect|down|status <tunnel>`;
+  the helper derives an "armed" config (no `DNS`, `Endpoint`, `PersistentKeepalive`) from
+  yours for `wg-quick up`, and uses `wg set` for connect/disconnect. WGBar applies and
+  restores DNS itself via `networksetup`.
 
 ## Hacking
 
-Everything is in `main.swift`. `./build.sh` builds `build/WGBar.app` without
-installing; `./install.sh` builds, installs and relaunches.
+The app is `main.swift`; `DNSGuard.swift`, `Updater.swift` and `OnDemand.swift` hold the
+testable parts; `helper/wgbar-helper` is the root helper. `./build.sh` builds
+`build/WGBar.app` without installing; `./install.sh` builds, installs and relaunches.
