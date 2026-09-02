@@ -16,8 +16,9 @@ set -euo pipefail
 CONF_DIR=/opt/homebrew/etc/wireguard
 WG_QUICK=/opt/homebrew/bin/wg-quick
 WG=/opt/homebrew/bin/wg
-export PATH="${WG_QUICK%/*}:/usr/bin:/bin:/usr/sbin:/sbin"
+export PATH="/usr/bin:/bin:/usr/sbin:/sbin:${WG_QUICK%/*}"
 [[ $EUID -ne 0 && -n "${WGBAR_CONF_DIR:-}" ]] && CONF_DIR="$WGBAR_CONF_DIR"
+ARMED_DIR=""
 
 usage() { echo "usage: wgbar-helper arm|connect|disconnect|down|status|print-armed <tunnel>" >&2; exit 2; }
 die() { echo "$*" >&2; exit 1; }
@@ -65,9 +66,9 @@ iface() { [[ -f "$namefile" ]] || die "$tunnel is not up"; cat "$namefile"; }
 
 # Writes the armed config (0600, in a root-only temp dir removed on exit) and sets $ARMED to its path.
 make_armed() {
-  local dir; dir="$(mktemp -d /tmp/wgbar.XXXXXX)"; chmod 700 "$dir"
-  trap 'rm -rf "$dir"' EXIT
-  ARMED="$dir/$tunnel.conf"
+  ARMED_DIR="$(mktemp -d /tmp/wgbar.XXXXXX)"; chmod 700 "$ARMED_DIR"
+  trap 'rm -rf "${ARMED_DIR:-}"' EXIT
+  ARMED="$ARMED_DIR/$tunnel.conf"
   (umask 077; armed_config > "$ARMED")
 }
 
@@ -77,7 +78,8 @@ case "$verb" in
   status)
     if [[ ! -f "$namefile" ]]; then echo off; exit 0; fi
     need_root
-    if "$WG" show "$(cat "$namefile")" endpoints | awk '{print $2}' | grep -qv '^(none)$'; then echo connected; else echo armed; fi ;;
+    eps="$("$WG" show "$(cat "$namefile")" endpoints)" || die "wg show failed for $tunnel"
+    if [[ -n "$(awk '$2 != "(none)" {print $2}' <<<"$eps")" ]]; then echo connected; else echo armed; fi ;;
   arm)
     need_root
     [[ -f "$namefile" ]] && exit 0
@@ -96,7 +98,7 @@ case "$verb" in
     i="$(iface)"
     pk="$(field PublicKey)" || die "no PublicKey in $conf"
     make_armed
-    "$WG_QUICK" strip "$ARMED" > "${ARMED%/*}/stripped.conf"
+    (umask 077; "$WG_QUICK" strip "$ARMED" > "${ARMED%/*}/stripped.conf")
     "$WG" set "$i" peer "$pk" remove
     "$WG" addconf "$i" "${ARMED%/*}/stripped.conf" ;;
   down)
