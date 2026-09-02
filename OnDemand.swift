@@ -90,3 +90,21 @@ func vpnBound(_ sockets: [TCPSocket], _ allowed: [CIDR]) -> [TCPSocket] {
         (s.state == "SYN_SENT" || s.state == "ESTABLISHED") && allowed.contains { $0.contains(s.remoteIP) }
     }
 }
+
+// MARK: State machine
+
+enum OnDemandState: String { case off, armed, connected, paused }
+
+enum OnDemandAction: Equatable { case connect, disconnect, resumeArmed }
+
+/// What to do on a poll tick. `lastSeen` is when VPN-bound sockets were last observed (or the last
+/// connect/disconnect, whichever is later); `idle` is how long to wait without traffic.
+func decide(state: OnDemandState, sticky: Bool, hasSockets: Bool, lastSeen: Date, now: Date, idle: TimeInterval) -> OnDemandAction? {
+    let quietFor = now.timeIntervalSince(lastSeen)
+    switch state {
+    case .armed:     return hasSockets ? .connect : nil
+    case .connected: return !sticky && !hasSockets && quietFor >= idle ? .disconnect : nil
+    case .paused:    return !hasSockets && quietFor >= idle ? .resumeArmed : nil
+    case .off:       return nil
+    }
+}

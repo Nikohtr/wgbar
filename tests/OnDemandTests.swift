@@ -51,4 +51,18 @@ func runOnDemandTests() {
     let bound = vpnBound(sockets, [lan, wide])
     expect(bound.map(\.remoteIP), ["10.42.1.9", "10.42.1.63"], "vpnBound: only SYN_SENT/ESTABLISHED inside AllowedIPs")
     expect(vpnBound(sockets, [CIDR("192.168.0.0/16")!]), [], "vpnBound: nothing inside")
+
+    // --- decide --------------------------------------------------------------
+    let t0 = Date(timeIntervalSince1970: 1_000_000)
+    func at(_ s: TimeInterval) -> Date { t0.addingTimeInterval(s) }
+    expect(decide(state: .armed, sticky: false, hasSockets: true, lastSeen: at(0), now: at(0), idle: 30), .connect, "decide: armed + traffic → connect")
+    expect(decide(state: .armed, sticky: false, hasSockets: false, lastSeen: at(0), now: at(100), idle: 30), nil, "decide: armed + quiet → nothing")
+    expect(decide(state: .connected, sticky: false, hasSockets: true, lastSeen: at(50), now: at(50), idle: 30), nil, "decide: connected + traffic → stay")
+    expect(decide(state: .connected, sticky: false, hasSockets: false, lastSeen: at(50), now: at(70), idle: 30), nil, "decide: connected + quiet but not idle yet → stay")
+    expect(decide(state: .connected, sticky: false, hasSockets: false, lastSeen: at(50), now: at(80), idle: 30), .disconnect, "decide: connected + idle reached → disconnect")
+    expect(decide(state: .connected, sticky: true, hasSockets: false, lastSeen: at(50), now: at(5000), idle: 30), nil, "decide: sticky never idles out")
+    expect(decide(state: .paused, sticky: false, hasSockets: true, lastSeen: at(0), now: at(0), idle: 30), nil, "decide: paused + traffic → stay paused")
+    expect(decide(state: .paused, sticky: false, hasSockets: false, lastSeen: at(0), now: at(10), idle: 30), nil, "decide: paused + quiet but not idle yet → stay")
+    expect(decide(state: .paused, sticky: false, hasSockets: false, lastSeen: at(0), now: at(30), idle: 30), .resumeArmed, "decide: paused + idle reached → armed")
+    expect(decide(state: .off, sticky: false, hasSockets: true, lastSeen: at(0), now: at(0), idle: 30), nil, "decide: off never acts")
 }
