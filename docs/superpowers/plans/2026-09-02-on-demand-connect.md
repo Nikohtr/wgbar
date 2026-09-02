@@ -520,7 +520,7 @@ $H print-armed "a/b" >/dev/null 2>&1; check "slash in name is rejected" "$?" "2"
 $H print-armed >/dev/null 2>&1; check "missing tunnel argument is a usage error" "$?" "2"
 $H bogus sample >/dev/null 2>&1; check "unknown verb is a usage error" "$?" "2"
 $H arm sample >/dev/null 2>&1; check "privileged verb refuses to run as a normal user" "$?" "1"
-$H connect sample 2>&1 >/dev/null | grep -q "root"; check "privileged verb says why" "$?" "0"
+check "privileged verb says why" "$($H connect sample 2>&1 >/dev/null || true)" "wgbar-helper connect must run as root (via sudo)"
 
 exit $fail
 ```
