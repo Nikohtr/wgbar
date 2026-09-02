@@ -173,10 +173,11 @@ one-line message on stderr on failure; WGBar shows that text in its error alert.
 - **Disable** (menu): restore DNS if connected, `down`, stop the poll, back to Classic.
 - **Tunnel change or Config Folder change** while enabled: `down` the current tunnel,
   then `arm` the new one (or turn On-Demand off if the new tunnel is full-tunnel).
-- **Failures**: if `arm` or `connect` fails, state becomes `off` (interface may or may
-  not exist); the icon shows `shield.slash`, the error alert shows the helper's message,
-  and the poll keeps running so a later `arm` attempt (next launch or re-enable) can fix it.
-  WGBar does not retry `arm` in a loop.
+- **Failures**: if `arm` fails (at enable or at launch), On-Demand is switched off: the
+  checkbox reverts, the default is cleared, and one alert shows the helper's message; the
+  user re-enables it after fixing the cause. If `connect` or `disconnect` fails, state
+  becomes `off` and the icon shows `shield.slash` while the interface may still exist;
+  disabling or quitting always issues `down` so nothing is orphaned.
 
 ## 6. Icon and menu
 

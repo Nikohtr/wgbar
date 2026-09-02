@@ -175,7 +175,8 @@ final class OnDemandController {
         let r = helper("status")
         guard r.ok else { set(.off); onError(r.output); return }
         switch r.output.split(separator: "\n").last.map(String.init) ?? "" {
-        case "connected": sticky = false; lastSeen = now(); set(.connected)
+        // Only a genuine adoption clears stickiness; re-confirming a manual connection keeps it.
+        case "connected": if state != .connected { sticky = false }; lastSeen = now(); set(.connected)
         case "armed":     set(.armed)
         default:          set(.off)
         }
@@ -206,8 +207,10 @@ final class OnDemandController {
     }
 
     /// Restore DNS if needed and take the interface down (quit, disable, tunnel change).
+    /// `down` is issued unconditionally — a failed connect or disconnect leaves the state `.off`
+    /// while the OS interface is still up, and the helper's `down` exits 0 when there is nothing
+    /// to take down, so this is both safe and the only way to guarantee nothing is orphaned.
     func shutdown() {
-        guard state != .off else { return }
         if state == .connected { onDisconnected() }
         let r = helper("down")
         if !r.ok { onError(r.output) }

@@ -16,7 +16,10 @@ set -euo pipefail
 CONF_DIR=/opt/homebrew/etc/wireguard
 WG_QUICK=/opt/homebrew/bin/wg-quick
 WG=/opt/homebrew/bin/wg
-export PATH="/usr/bin:/bin:/usr/sbin:/sbin:${WG_QUICK%/*}"
+# Homebrew's dir must come FIRST: wg-quick's shebang is `#!/usr/bin/env bash` and it aborts with
+# "Version mismatch: bash 3 detected, when bash 4+ required" if env picks macOS's /bin/bash 3.2.
+# This does not shadow the system tools wg-quick uses: it re-exports a system-first PATH itself.
+export PATH="${WG_QUICK%/*}:/usr/bin:/bin:/usr/sbin:/sbin"
 [[ $EUID -ne 0 && -n "${WGBAR_CONF_DIR:-}" ]] && CONF_DIR="$WGBAR_CONF_DIR"
 ARMED_DIR=""
 

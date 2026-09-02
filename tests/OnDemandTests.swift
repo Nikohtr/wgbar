@@ -192,6 +192,15 @@ func runOnDemandTests() {
         sys.netstat = ""; sys.advance(30); c.tick()
         expect(c.state, .armed, "reconcile: adopted connection is not sticky and idles out")
     }
+    do {   // reconcile over an already-connected sticky controller keeps it sticky
+        let sys = FakeSystem(); let (c, _) = sys.controller()
+        c.arm(); c.manualToggle()
+        expect(c.state, .connected, "reconcile sticky: manual connect first")
+        sys.statusOutput = "connected"; c.reconcile()
+        sys.netstat = ""; sys.advance(3600); c.tick()
+        expect(c.state, .connected, "reconcile: a re-confirmed manual connection stays sticky")
+        expect(sys.verbs.contains("disconnect"), false, "reconcile: sticky connection is not idled out")
+    }
     do {   // shutdown
         let sys = FakeSystem(); let (c, ev) = sys.controller()
         c.arm(); sys.netstat = syn; c.tick()
@@ -202,7 +211,7 @@ func runOnDemandTests() {
         expect(ev.log, ["arm", "connect", "onConnected", "onDisconnected", "down"], "shutdown: DNS restored before helper down")
         let sys2 = FakeSystem(); let (c2, ev2) = sys2.controller()
         c2.shutdown()
-        expect(sys2.verbs, [], "shutdown: nothing to do when off")
+        expect(sys2.verbs, ["down"], "shutdown: always issues down so a failed connect cannot orphan the interface")
         expect(ev2.disconnected, 0, "shutdown: no DNS restore when off")
     }
     do {   // manualToggle from .off re-arms

@@ -188,14 +188,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         refresh()
         Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in self?.refresh() }
         Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in self?.onDemandTick() }
-        if defaults.bool(forKey: "onDemand") { startOnDemand(atLaunch: true) }
-
         // DNS guard: a reboot or crash with the tunnel up leaves VPN DNS behind; so can waking.
         checkDNS()
         NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { [weak self] _ in
             self?.odQueue.async { self?.odOwned?.reconcile() }
             DispatchQueue.main.asyncAfter(deadline: .now() + 3) { self?.checkDNS() }
         }
+        // Last: startOnDemand sets busy, which would make the launch-time checkDNS above bail out.
+        if defaults.bool(forKey: "onDemand") { startOnDemand(atLaunch: true) }
     }
 
     // MARK: State

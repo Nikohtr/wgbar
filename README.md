@@ -151,7 +151,8 @@ cd wgbar && git pull && ./install.sh
 ./uninstall.sh
 ```
 
-Removes the app, its settings, and the sudoers rule (if installed).
+Quits the app (restoring DNS and taking an on-demand tunnel down), then removes the app,
+its settings, the helper and the sudoers rule (if installed).
 
 ## How it works
 
