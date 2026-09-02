@@ -133,6 +133,8 @@ func expect<T: Equatable>(_ actual: T, _ expected: T, _ name: String, file: Stri
                .failed("WGBar does not know where its source checkout is. Run ./install.sh from the wgbar folder once."),
                "update: no repo recorded")
 
+        runOnDemandTests()
+
         print("\(passes) passed, \(failures) failed")
         exit(failures == 0 ? 0 : 1)
     }
