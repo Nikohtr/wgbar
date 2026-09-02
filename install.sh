@@ -33,4 +33,9 @@ cp -R build/WGBar.app ~/Applications/WGBar.app
 defaults write org.wgbar.WGBar repoDir "$PWD"   # lets "Check for Updates…" find this clone
 open ~/Applications/WGBar.app
 echo "Installed and launched ~/Applications/WGBar.app"
-echo "Optional: run ./sudoers.sh to skip the password prompt when toggling."
+
+HELPER=/usr/local/libexec/wgbar-helper
+if [[ -e "$HELPER" ]] && ! diff -q <(grep -vE '^(CONF_DIR|WG_QUICK|WG)=' "$HELPER") <(grep -vE '^(CONF_DIR|WG_QUICK|WG)=' helper/wgbar-helper) >/dev/null; then
+  echo "Note: the installed WGBar helper is out of date. Run ./sudoers.sh to update it."
+fi
+echo "Optional: run ./sudoers.sh to skip the password prompt when toggling (required for Connect on Demand)."
