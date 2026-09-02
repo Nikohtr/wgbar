@@ -67,27 +67,29 @@ func runOnDemandTests() {
     expect(decide(state: .off, sticky: false, hasSockets: true, lastSeen: at(0), now: at(0), idle: 30), nil, "decide: off never acts")
 
     // --- controller (fake sudo/netstat/ping) ----------------------------------------
-    /// Counts the controller's callbacks.
-    final class Events { var connected = 0, disconnected = 0; var errors: [String] = []; var states: [OnDemandState] = [] }
+    /// Counts the controller's callbacks; `log` records callback/helper-verb order.
+    final class Events { var connected = 0, disconnected = 0; var errors: [String] = []; var states: [OnDemandState] = []; var log: [String] = [] }
     /// Fakes every command the controller runs and records the helper verbs it asked for.
     final class FakeSystem {
         var netstat = ""
+        var netstatFails = false
         var helperFails: Set<String> = []          // verbs that fail
         var sudoNeedsPassword = false
         var statusOutput = "armed"
         var verbs: [String] = []
         var pings: [String] = []
+        var events: Events?
         var clock = Date(timeIntervalSince1970: 1_000_000)
         func advance(_ s: TimeInterval) { clock = clock.addingTimeInterval(s) }
         func run(_ exe: String, _ args: [String]) -> CmdResult {
             switch exe {
-            case "/usr/sbin/netstat": return CmdResult(status: 0, output: netstat)
+            case "/usr/sbin/netstat": return netstatFails ? CmdResult(status: 1, output: "") : CmdResult(status: 0, output: netstat)
             case "/sbin/ping": pings.append(args.last ?? ""); return CmdResult(status: 0, output: "")
             case "/usr/bin/sudo":
                 expect(Array(args.prefix(2)), ["-n", OnDemandController.helperPath], "controller: sudo -n helper")
                 expect(args.last, "ileasing", "controller: tunnel name passed")
                 if sudoNeedsPassword { return CmdResult(status: 1, output: "sudo: a password is required") }
-                let verb = args[2]; verbs.append(verb)
+                let verb = args[2]; verbs.append(verb); events?.log.append(verb)
                 if helperFails.contains(verb) { return CmdResult(status: 1, output: "wg-quick: boom") }
                 return CmdResult(status: 0, output: verb == "status" ? statusOutput : "")
             default: return CmdResult(status: 1, output: "unexpected \(exe)")
@@ -95,10 +97,11 @@ func runOnDemandTests() {
         }
         func controller(kick: String? = "10.0.0.22") -> (OnDemandController, Events) {
             let ev = Events()
+            events = ev
             let c = OnDemandController(tunnel: "ileasing", allowed: [CIDR("10.0.0.0/24")!, CIDR("10.42.0.0/16")!],
                                        idle: 30, kick: kick, run: run, now: { self.clock })
-            c.onConnected = { ev.connected += 1 }
-            c.onDisconnected = { ev.disconnected += 1 }
+            c.onConnected = { ev.connected += 1; ev.log.append("onConnected") }
+            c.onDisconnected = { ev.disconnected += 1; ev.log.append("onDisconnected") }
             c.onError = { ev.errors.append($0) }
             c.onChange = { ev.states.append($0) }
             return (c, ev)
@@ -136,6 +139,7 @@ func runOnDemandTests() {
         expect(sys.verbs, ["arm", "connect"], "cycle: helper connect called once")
         expect(sys.pings, ["10.0.0.22"], "cycle: handshake kicked with a ping")
         expect(ev.connected, 1, "cycle: onConnected fired (DNS applied)")
+        expect(ev.log, ["arm", "connect", "onConnected"], "cycle: onConnected fires after helper connect")
         sys.netstat = rdp; sys.advance(600); c.tick()
         expect(c.state, .connected, "cycle: established session keeps it up")
         sys.netstat = web; sys.advance(20); c.tick()
@@ -145,6 +149,7 @@ func runOnDemandTests() {
         expect(sys.verbs, ["arm", "connect", "disconnect"], "cycle: helper disconnect called")
         expect(ev.disconnected, 1, "cycle: onDisconnected fired (DNS restored)")
         expect(ev.states, [.armed, .connected, .armed], "cycle: state changes reported")
+        expect(ev.log, ["arm", "connect", "onConnected", "onDisconnected", "disconnect"], "cycle: DNS restored before helper disconnect")
     }
     do {   // connect failure → off, no retry loop
         let sys = FakeSystem(); sys.helperFails = ["connect"]; let (c, ev) = sys.controller()
@@ -194,9 +199,40 @@ func runOnDemandTests() {
         expect(sys.verbs, ["arm", "connect", "down"], "shutdown: connected → down (helper's down handles the peer)")
         expect(ev.disconnected, 1, "shutdown: DNS restored first")
         expect(c.state, .off, "shutdown: off")
+        expect(ev.log, ["arm", "connect", "onConnected", "onDisconnected", "down"], "shutdown: DNS restored before helper down")
         let sys2 = FakeSystem(); let (c2, ev2) = sys2.controller()
         c2.shutdown()
         expect(sys2.verbs, [], "shutdown: nothing to do when off")
         expect(ev2.disconnected, 0, "shutdown: no DNS restore when off")
+    }
+    do {   // manualToggle from .off re-arms
+        let sys = FakeSystem(); let (c, _) = sys.controller()
+        c.manualToggle()
+        expect(sys.verbs, ["arm"], "manual from off: calls helper arm")
+        expect(c.state, .armed, "manual from off: state armed")
+    }
+    do {   // failing disconnect still restores DNS and goes off
+        let sys = FakeSystem(); sys.helperFails = ["disconnect"]; let (c, ev) = sys.controller()
+        c.arm(); sys.netstat = syn; c.tick()
+        expect(c.state, .connected, "failing disconnect: connected first")
+        sys.netstat = ""; sys.advance(30); c.tick()
+        expect(c.state, .off, "failing disconnect: state off")
+        expect(ev.disconnected, 1, "failing disconnect: DNS restored anyway")
+        expect(ev.errors, ["wg-quick: boom"], "failing disconnect: helper output surfaced")
+    }
+    do {   // failing status in reconcile
+        let sys = FakeSystem(); sys.helperFails = ["status"]; let (c, ev) = sys.controller()
+        c.reconcile()
+        expect(c.state, .off, "failing reconcile: state off")
+        expect(ev.errors, ["wg-quick: boom"], "failing reconcile: helper output surfaced")
+    }
+    do {   // netstat failure during a tick is treated as unknown, not quiet — no idle disconnect
+        let sys = FakeSystem(); let (c, ev) = sys.controller()
+        c.arm(); sys.netstat = syn; c.tick()
+        expect(c.state, .connected, "netstat failure: connected first")
+        sys.netstatFails = true; sys.advance(3600); c.tick()
+        expect(c.state, .connected, "netstat failure: stays connected, does not idle out")
+        expect(sys.verbs, ["arm", "connect"], "netstat failure: no disconnect verb called")
+        expect(ev.disconnected, 0, "netstat failure: DNS untouched")
     }
 }

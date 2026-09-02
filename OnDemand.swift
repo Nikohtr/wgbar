@@ -156,8 +156,11 @@ final class OnDemandController {
         return (false, r.output.isEmpty ? "wgbar-helper \(verb) failed" : r.output)
     }
 
-    private func sockets() -> [TCPSocket] {
-        vpnBound(parseNetstat(run("/usr/sbin/netstat", ["-n", "-p", "tcp"]).output), allowed)
+    /// nil when `netstat` itself failed — a failed read must not be mistaken for "no traffic".
+    private func sockets() -> [TCPSocket]? {
+        let r = run("/usr/sbin/netstat", ["-n", "-p", "tcp"])
+        guard r.status == 0 else { return nil }
+        return vpnBound(parseNetstat(r.output), allowed)
     }
 
     /// Bring the interface up without an endpoint. False (and `onError`) if the helper failed.
@@ -178,10 +181,11 @@ final class OnDemandController {
         }
     }
 
-    /// One poll: look at the sockets, act on `decide`.
+    /// One poll: look at the sockets, act on `decide`. Skipped (state unchanged) if `netstat` fails.
     func tick() {
         guard state != .off else { return }
-        let has = !sockets().isEmpty
+        guard let socks = sockets() else { return }
+        let has = !socks.isEmpty
         let t = now()
         if has { lastSeen = t }
         switch decide(state: state, sticky: sticky, hasSockets: has, lastSeen: lastSeen, now: t, idle: idle) {
@@ -226,6 +230,6 @@ final class OnDemandController {
         sticky = false
         lastSeen = now()
         guard r.ok else { set(.off); onError(r.output); return }
-        set(sockets().isEmpty ? .armed : .paused)
+        set((sockets() ?? []).isEmpty ? .armed : .paused)
     }
 }
