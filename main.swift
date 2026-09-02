@@ -91,6 +91,13 @@ func anyTunnelUp() -> Bool {
     return names.contains { $0.hasSuffix(".name") }
 }
 
+/// Like `anyTunnelUp`, but an on-demand interface that is merely armed (no endpoint, no VPN DNS)
+/// does not count: its name file exists while DNS must still be the user's own.
+func anyTunnelConnected(ignoring armedTunnel: String?) -> Bool {
+    let names = (try? FileManager.default.contentsOfDirectory(atPath: "/var/run/wireguard")) ?? []
+    return names.contains { $0.hasSuffix(".name") && $0 != armedTunnel.map { "\($0).name" } }
+}
+
 let networkPrefs = "/Library/Preferences/SystemConfiguration/preferences.plist"
 func networkPrefsModified() -> Date {
     (try? FileManager.default.attributesOfItem(atPath: networkPrefs))?[.modificationDate] as? Date ?? .distantPast
@@ -116,6 +123,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let folderItem = NSMenuItem(title: "Config Folder…", action: #selector(chooseFolder), keyEquivalent: "")
     private let repairItem = NSMenuItem(title: "Repair DNS", action: #selector(repairDNS), keyEquivalent: "")
     private let updateItem = NSMenuItem(title: "Check for Updates…", action: #selector(checkForUpdates), keyEquivalent: "")
+    private let onDemandItem = NSMenuItem(title: "Connect on Demand", action: #selector(toggleOnDemand), keyEquivalent: "")
+    /// Present while "Connect on Demand" is enabled. Only ever touched on `odQueue`.
+    private var onDemand: OnDemandController?
+    /// Mirror of the controller's state for the main thread (updated via onChange).
+    private var odState: OnDemandState = .off
+    private var odTunnel: String?
+    private var odInFlight = false
+    private let odQueue = DispatchQueue(label: "org.wgbar.ondemand")
     private var tunnel = ""
     private var isUp = false
     private var busy = false
@@ -148,12 +163,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         folderItem.target = self
         repairItem.target = self
         updateItem.target = self
+        onDemandItem.target = self
         menu.addItem(statusLine)
         menu.addItem(dnsLine)
         menu.addItem(toggleItem)
         menu.addItem(repairItem)
         menu.addItem(.separator())
         menu.addItem(tunnelItem)
+        menu.addItem(onDemandItem)
         menu.addItem(folderItem)
         menu.addItem(loginItem)
         menu.addItem(updateItem)
@@ -169,10 +186,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         resolveTunnel()
         refresh()
         Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in self?.refresh() }
+        Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in self?.onDemandTick() }
+        if defaults.bool(forKey: "onDemand") { startOnDemand(atLaunch: true) }
 
         // DNS guard: a reboot or crash with the tunnel up leaves VPN DNS behind; so can waking.
         checkDNS()
         NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { [weak self] _ in
+            self?.odQueue.async { self?.onDemand?.reconcile() }
             DispatchQueue.main.asyncAfter(deadline: .now() + 3) { self?.checkDNS() }
         }
     }
@@ -182,7 +202,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func refresh() {
         if tunnel.isEmpty { resolveTunnel() }
         let wasUp = isUp
-        isUp = !tunnel.isEmpty && FileManager.default.fileExists(atPath: runFile(tunnel))
+        isUp = odTunnel != nil ? odState == .connected
+             : !tunnel.isEmpty && FileManager.default.fileExists(atPath: runFile(tunnel))
         updateIcon()
         // The tunnel went down outside WGBar, or the network preferences changed: re-check DNS.
         let prefsNow = networkPrefsModified()
@@ -193,10 +214,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private func updateIcon() {
+        let armed = odTunnel != nil && (odState == .armed || odState == .paused)
         let name = busy ? "shield.lefthalf.filled"
             : isUp ? "shield.fill"
+            : armed ? "shield"
             : dnsIssue.isEmpty ? "shield.slash" : "exclamationmark.shield"
-        let desc = busy ? "WireGuard switching" : (isUp ? "WireGuard on" : "WireGuard off")
+        let desc = busy ? "WireGuard switching" : isUp ? "WireGuard on" : armed ? "WireGuard armed" : "WireGuard off"
         let image = NSImage(systemSymbolName: name, accessibilityDescription: desc)
         image?.isTemplate = true
         statusItem.button?.image = image
@@ -204,7 +227,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             ? "No WireGuard configs found in \(confDir)"
             : !dnsIssue.isEmpty && !isUp
             ? "VPN DNS left behind on \(dnsIssue.joined(separator: ", ")) — right-click → Repair DNS"
-            : "\(tunnel): \(isUp ? "connected" : "disconnected") — click to toggle"
+            : statusText() + " — click to toggle"
+    }
+
+    /// "ileasing: Connected" etc., shared by the menu status line and the icon tooltip.
+    private func statusText() -> String {
+        let addr = tunnelAddress(tunnel).map { " — \($0)" } ?? ""
+        guard odTunnel != nil else { return "\(tunnel): " + (isUp ? "Connected\(addr)" : "Disconnected") }
+        switch odState {
+        case .connected: return "\(tunnel): Connected (on demand)\(addr)"
+        case .armed:     return "\(tunnel): Armed, connects on demand"
+        case .paused:    return "\(tunnel): Paused"
+        case .off:       return "\(tunnel): Off (on demand not armed)"
+        }
     }
 
     // MARK: DNS guard
@@ -212,7 +247,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// If no tunnel is up but some network service still points at a VPN DNS server, restore
     /// that service's pre-connect DNS (or clear it, i.e. back to DHCP) and say so.
     private func checkDNS(interactive: Bool = false) {
-        guard !busy, !dnsChecking, !anyTunnelUp() else { return }
+        let armed = odTunnel != nil && odState != .connected ? odTunnel : nil
+        guard !busy, !dnsChecking, !anyTunnelConnected(ignoring: armed) else { return }
         let vpnDNS = allConfigDNS()
         guard !vpnDNS.isEmpty else { return }
         dnsChecking = true
@@ -267,9 +303,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             toggleItem.title = "Connect"
             toggleItem.isEnabled = false
         } else {
-            statusLine.title = isUp
-                ? "\(tunnel): Connected" + (tunnelAddress(tunnel).map { " — \($0)" } ?? "")
-                : "\(tunnel): Disconnected"
+            statusLine.title = statusText()
             toggleItem.title = isUp ? "Disconnect" : "Connect"
             toggleItem.isEnabled = !busy
         }
@@ -279,6 +313,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         repairItem.isEnabled = !busy && !dnsChecking
         updateItem.isEnabled = !busy
         rebuildTunnelSubmenu()
+        let confText = tunnel.isEmpty ? "" : (try? String(contentsOfFile: confPath(tunnel), encoding: .utf8)) ?? ""
+        let full = isFullTunnel(parseAllowedIPs(confText))
+        onDemandItem.state = odTunnel != nil ? .on : .off
+        onDemandItem.isEnabled = !busy && !tunnel.isEmpty && (odTunnel != nil || !full)
+        onDemandItem.toolTip = full ? "Not available for full-tunnel configs (AllowedIPs includes 0.0.0.0/0)"
+                                    : "Keep the tunnel armed and connect it when traffic to its AllowedIPs appears"
         folderItem.toolTip = confDir
         loginItem.state = SMAppService.mainApp.status == .enabled ? .on : .off
         statusItem.menu = menu
@@ -304,7 +344,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         guard !busy, sender.title != tunnel else { return }
         tunnel = sender.title
         defaults.set(tunnel, forKey: "tunnel")
-        refresh()
+        if odTunnel != nil { restartOnDemand() } else { refresh() }
     }
 
     func menuDidClose(_ menu: NSMenu) {
@@ -313,6 +353,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc private func toggle() {
         guard !busy else { return }
+        if odTunnel != nil {
+            busy = true; updateIcon()
+            odQueue.async {
+                self.onDemand?.manualToggle()
+                DispatchQueue.main.async { self.busy = false; self.refresh() }
+            }
+            return
+        }
         if tunnel.isEmpty {
             showError("", "No WireGuard configs found in \(confDir).\nPut a <name>.conf there (see README) and try again.")
             return
@@ -338,6 +386,128 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
+    // MARK: On demand
+
+    private func onDemandTick() {
+        guard odTunnel != nil, !odInFlight, !busy else { return }
+        odInFlight = true
+        odQueue.async {
+            self.onDemand?.tick()
+            DispatchQueue.main.async { self.odInFlight = false }
+        }
+    }
+
+    private func makeController(_ tunnel: String, _ cidrs: [CIDR]) -> OnDemandController {
+        let idle = (defaults.object(forKey: "onDemandIdle") as? NSNumber)?.doubleValue ?? 30
+        let text = (try? String(contentsOfFile: confPath(tunnel), encoding: .utf8)) ?? ""
+        let od = OnDemandController(tunnel: tunnel, allowed: cidrs, idle: idle,
+                                    kick: configDNSServers(text).first, run: run, now: Date.init)
+        od.onConnected = { [weak self] in self?.applyVPNDNS(for: tunnel) }
+        od.onDisconnected = { [weak self] in self?.restoreDNS() }
+        od.onError = { [weak self] msg in DispatchQueue.main.async { self?.showError("", msg) } }
+        od.onChange = { [weak self] s in DispatchQueue.main.async { self?.odState = s; self?.refresh() } }
+        return od
+    }
+
+    /// Runs on odQueue. Remember the current DNS, then set the config's servers everywhere (as wg-quick would).
+    private func applyVPNDNS(for tunnel: String) {
+        guard let text = try? String(contentsOfFile: confPath(tunnel), encoding: .utf8) else { return }
+        let servers = configDNSServers(text)
+        guard !servers.isEmpty else { return }
+        let guardian = DNSGuard(vpnDNS: allConfigDNS(), run: run)
+        defaults.set(guardian.snapshot(), forKey: "dnsSnapshot")
+        let errors = guardian.apply(servers: servers, search: configDNSSearch(text))
+        DispatchQueue.main.async {
+            self.prefsSeen = networkPrefsModified()
+            if !errors.isEmpty { self.showError("", "Could not set VPN DNS:\n" + errors.joined(separator: "\n")) }
+        }
+    }
+
+    /// Runs on odQueue. Put back whatever DNS the services had before connect.
+    private func restoreDNS() {
+        let snapshot = defaults.dictionary(forKey: "dnsSnapshot") as? DNSSnapshot ?? [:]
+        let result = DNSGuard(vpnDNS: allConfigDNS(), run: run).repair(snapshot: snapshot)
+        DispatchQueue.main.async {
+            self.prefsSeen = networkPrefsModified()
+            if !result.errors.isEmpty { self.showError("", "Could not restore DNS:\n" + result.errors.joined(separator: "\n")) }
+        }
+    }
+
+    /// Menu checkbox: enable or disable Connect on Demand for the selected tunnel.
+    @objc private func toggleOnDemand() {
+        guard !busy else { return }
+        if odTunnel != nil { stopOnDemand(); return }
+        startOnDemand(atLaunch: false)
+    }
+
+    /// Arm the selected tunnel. At launch, adopt the interface's real state first (it may still be up).
+    private func startOnDemand(atLaunch: Bool) {
+        guard !tunnel.isEmpty else { return }
+        guard OnDemandController.helperInstalled() else {
+            defaults.set(false, forKey: "onDemand")
+            showError("", OnDemandController.needsHelperMessage)
+            return
+        }
+        guard let text = try? String(contentsOfFile: confPath(tunnel), encoding: .utf8) else { return }
+        let cidrs = parseAllowedIPs(text)
+        guard !cidrs.isEmpty, !isFullTunnel(cidrs) else {
+            defaults.set(false, forKey: "onDemand")
+            showError("", "Connect on Demand needs a split-tunnel config (specific AllowedIPs, not 0.0.0.0/0).")
+            return
+        }
+        busy = true; updateIcon()
+        let tunnel = self.tunnel
+        let od = makeController(tunnel, cidrs)
+        odQueue.async {
+            // A classic `wg-quick up` interface carries VPN DNS and a monitor that re-applies it: replace it.
+            if !atLaunch, FileManager.default.fileExists(atPath: runFile(tunnel)) {
+                if let error = wgQuick("down", tunnel) {
+                    DispatchQueue.main.async { self.busy = false; self.refresh(); self.showError("down", error) }
+                    return
+                }
+            }
+            if atLaunch { od.reconcile() }
+            let ok = od.state != .off || od.arm()
+            DispatchQueue.main.async {
+                self.busy = false
+                if ok {
+                    self.onDemand = od; self.odTunnel = tunnel; self.odState = od.state
+                    defaults.set(true, forKey: "onDemand")
+                } else {
+                    defaults.set(false, forKey: "onDemand")
+                }
+                self.refresh()
+            }
+        }
+    }
+
+    /// Take the on-demand interface down and return to classic mode.
+    private func stopOnDemand(then completion: (() -> Void)? = nil) {
+        guard let od = onDemand else { completion?(); return }
+        busy = true; updateIcon()
+        onDemand = nil; odTunnel = nil; odState = .off
+        defaults.set(false, forKey: "onDemand")
+        odQueue.async {
+            od.shutdown()
+            DispatchQueue.main.async { self.busy = false; self.refresh(); completion?() }
+        }
+    }
+
+    /// The tunnel or config folder changed while On-Demand is on: re-arm for the new selection.
+    private func restartOnDemand() {
+        guard odTunnel != nil else { return }
+        stopOnDemand { [weak self] in
+            self?.resolveTunnel()
+            self?.startOnDemand(atLaunch: false)
+        }
+    }
+
+    /// Quit: an armed interface with nobody watching would black-hole the VPN subnets. Take it down.
+    func applicationWillTerminate(_ notification: Notification) {
+        guard let od = onDemand else { return }
+        odQueue.sync { od.shutdown() }
+    }
+
     /// Pick the folder holding <name>.conf files (for setups outside the default locations).
     @objc private func chooseFolder() {
         let panel = NSOpenPanel()
@@ -357,7 +527,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         defaults.set(dir, forKey: "confDir")
         defaults.removeObject(forKey: "tunnel")
         tunnel = ""
-        refresh()
+        resolveTunnel()
+        if odTunnel != nil { restartOnDemand() } else { refresh() }
     }
 
     // MARK: Updates
