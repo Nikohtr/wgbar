@@ -96,10 +96,10 @@ and keeps the sockets whose remote address is inside the tunnel's `AllowedIPs`.
   idle period. Default 30 s; `defaults write org.wgbar.WGBar onDemandIdle 30` overrides.
   The RDP client holds one TCP connection for the whole session, so this means
   "30 s after the VM window closes".
-- After `connect` the helper returns and WGBar sends one `ping -c 1 -W 1000` to the first
-  VPN DNS server if any, else the first usable address of the first `AllowedIPs` network.
-  Any packet toward the peer starts the handshake; the ping merely avoids waiting for
-  the next TCP retransmit (1 s, then 3 s).
+- After `connect` returns, WGBar sends one `ping -c 1 -W 1000` to the config's first VPN
+  DNS server, if it has one. Any packet toward the peer starts the handshake; the ping
+  merely avoids waiting for the next TCP retransmit (1 s, then 3 s). Configs without a
+  `DNS` line skip the ping and rely on the retransmit.
 
 The decision logic is a pure function
 `decide(state:, sticky:, sockets:, lastSeen:, now:, idle:) -> Action?` with actions
