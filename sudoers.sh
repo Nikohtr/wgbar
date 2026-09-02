@@ -5,10 +5,8 @@
 # re-run this script after adding a config or updating WGBar. Remove with:
 #   sudo rm /etc/sudoers.d/wgbar /usr/local/libexec/wgbar-helper
 #
-# Security: the sudoers rule lets the user run the installed helper with any arguments, and its
-# "print-armed" verb prints the config (including the private key) — so CONF_DIR must stay a
-# folder the user could already read anyway. The logic below only ever picks a user-owned
-# Homebrew/MacPorts folder or a folder the user chose themselves, never a root-only /etc one.
+# Security: the rule lets the user run the helper with any arguments, and its print-armed verb prints a
+# config (private key included), so this script refuses config files the user cannot already read.
 #
 # Usage: ./sudoers.sh [config-folder]
 #   The folder defaults to the one WGBar uses (its "Config Folder…" setting, else the first
@@ -40,7 +38,8 @@ HELPER=/usr/local/libexec/wgbar-helper
 CMDS=("$HELPER")
 for f in "$CONF_DIR"/*.conf; do
   [[ -e "$f" ]] || continue
-  CMDS+=("$WG_QUICK up $f" "$WG_QUICK down $f")
+  [[ -r "$f" ]] || { echo "$f is not readable by $(id -un); the helper's print-armed must not reveal configs you cannot read. Use a folder you own." >&2; exit 1; }
+  CMDS+=("$WG_QUICK up ${f// /\\ }" "$WG_QUICK down ${f// /\\ }")
 done
 [[ ${#CMDS[@]} -gt 1 ]] || { echo "No .conf files in $CONF_DIR; nothing to allow." >&2; exit 1; }
 
@@ -52,8 +51,11 @@ trap 'rm -f "$TMP" "$TMP_HELPER"' EXIT
   echo "# Installed by WGBar (sudoers.sh). Lets $(id -un) toggle WireGuard tunnels in $CONF_DIR without a password."
   echo "$RULE"
 } > "$TMP"
-sed -e "s|^CONF_DIR=.*|CONF_DIR=$CONF_DIR|" -e "s|^WG_QUICK=.*|WG_QUICK=$WG_QUICK|" -e "s|^WG=.*|WG=$WG|" \
-  helper/wgbar-helper > "$TMP_HELPER"
+CD="$(printf '%q' "$CONF_DIR")" WQ="$(printf '%q' "$WG_QUICK")" WGB="$(printf '%q' "$WG")" \
+awk '/^CONF_DIR=/ { print "CONF_DIR=" ENVIRON["CD"]; next }
+     /^WG_QUICK=/ { print "WG_QUICK=" ENVIRON["WQ"]; next }
+     /^WG=/       { print "WG=" ENVIRON["WGB"]; next }
+     { print }' helper/wgbar-helper > "$TMP_HELPER"
 bash -n "$TMP_HELPER"
 
 echo "About to install this rule to /etc/sudoers.d/wgbar:"
