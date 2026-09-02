@@ -1,0 +1,107 @@
+#!/bin/bash
+# wgbar-helper — the one privileged command WGBar's "Connect on Demand" mode needs.
+# Installed to /usr/local/libexec/wgbar-helper by sudoers.sh, which rewrites the three
+# paths below and allows the current user to run this file (and nothing else) via sudo.
+# Design: docs/superpowers/specs/2026-09-02-on-demand-design.md
+#
+# Usage: wgbar-helper arm|connect|disconnect|down|status|print-armed <tunnel>
+#   arm          bring the interface up from the "armed" config (no DNS, no Endpoint)
+#   connect      give the peer its Endpoint (and PersistentKeepalive) → traffic flows
+#   disconnect   take the Endpoint away again; routes stay, packets are held
+#   down         wg-quick down (never touches DNS, since the armed config has none)
+#   status       print off | armed | connected
+#   print-armed  print the derived armed config (works without root; for tests)
+set -euo pipefail
+
+CONF_DIR=/opt/homebrew/etc/wireguard
+WG_QUICK=/opt/homebrew/bin/wg-quick
+WG=/opt/homebrew/bin/wg
+export PATH="${WG_QUICK%/*}:/usr/bin:/bin:/usr/sbin:/sbin"
+[[ $EUID -ne 0 && -n "${WGBAR_CONF_DIR:-}" ]] && CONF_DIR="$WGBAR_CONF_DIR"
+
+usage() { echo "usage: wgbar-helper arm|connect|disconnect|down|status|print-armed <tunnel>" >&2; exit 2; }
+die() { echo "$*" >&2; exit 1; }
+
+verb="${1:-}"; tunnel="${2:-}"
+case "$verb" in arm|connect|disconnect|down|status|print-armed) ;; *) usage ;; esac
+[[ -n "$tunnel" ]] || usage
+# Same character set wg-quick accepts for interface names; in particular no "/" or "..".
+[[ "$tunnel" =~ ^[a-zA-Z0-9_=+.-]{1,15}$ && "$tunnel" != *..* ]] || usage
+conf="$CONF_DIR/$tunnel.conf"
+[[ -f "$conf" ]] || die "no such config: $conf"
+namefile="/var/run/wireguard/$tunnel.name"
+
+lower() { tr '[:upper:]' '[:lower:]' <<<"$1"; }
+trim() { local v="$1"; v="${v#"${v%%[![:space:]]*}"}"; printf '%s' "${v%"${v##*[![:space:]]}"}"; }
+
+# The armed variant of the real config: every line except DNS, Endpoint and PersistentKeepalive.
+armed_config() {
+  local line key
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    if [[ "$line" == *=* ]]; then
+      key="$(lower "$(trim "${line%%=*}")")"
+      case "$key" in dns|endpoint|persistentkeepalive) continue ;; esac
+    fi
+    printf '%s\n' "$line"
+  done < "$conf"
+}
+
+# First value of key $1 (case-insensitive) in the real config; comments stripped. Exit 1 if absent.
+field() {
+  local want line key
+  want="$(lower "$1")"
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    line="${line%%\#*}"
+    [[ "$line" == *=* ]] || continue
+    key="$(lower "$(trim "${line%%=*}")")"
+    [[ "$key" == "$want" ]] || continue
+    trim "${line#*=}"; echo; return 0
+  done < "$conf"
+  return 1
+}
+
+need_root() { [[ $EUID -eq 0 ]] || die "wgbar-helper $verb must run as root (via sudo)"; }
+iface() { [[ -f "$namefile" ]] || die "$tunnel is not up"; cat "$namefile"; }
+
+# Writes the armed config (0600, in a root-only temp dir removed on exit) and sets $ARMED to its path.
+make_armed() {
+  local dir; dir="$(mktemp -d /tmp/wgbar.XXXXXX)"; chmod 700 "$dir"
+  trap 'rm -rf "$dir"' EXIT
+  ARMED="$dir/$tunnel.conf"
+  (umask 077; armed_config > "$ARMED")
+}
+
+case "$verb" in
+  print-armed)
+    armed_config ;;
+  status)
+    if [[ ! -f "$namefile" ]]; then echo off; exit 0; fi
+    need_root
+    if "$WG" show "$(cat "$namefile")" endpoints | awk '{print $2}' | grep -qv '^(none)$'; then echo connected; else echo armed; fi ;;
+  arm)
+    need_root
+    [[ -f "$namefile" ]] && exit 0
+    make_armed
+    "$WG_QUICK" up "$ARMED" ;;
+  connect)
+    need_root
+    i="$(iface)"
+    pk="$(field PublicKey)" || die "no PublicKey in $conf"
+    ep="$(field Endpoint)"  || die "no Endpoint in $conf"
+    ka="$(field PersistentKeepalive || true)"
+    if [[ -n "$ka" ]]; then "$WG" set "$i" peer "$pk" endpoint "$ep" persistent-keepalive "$ka"
+    else "$WG" set "$i" peer "$pk" endpoint "$ep"; fi ;;
+  disconnect)
+    need_root
+    i="$(iface)"
+    pk="$(field PublicKey)" || die "no PublicKey in $conf"
+    make_armed
+    "$WG_QUICK" strip "$ARMED" > "${ARMED%/*}/stripped.conf"
+    "$WG" set "$i" peer "$pk" remove
+    "$WG" addconf "$i" "${ARMED%/*}/stripped.conf" ;;
+  down)
+    need_root
+    [[ -f "$namefile" ]] || exit 0
+    make_armed
+    "$WG_QUICK" down "$ARMED" ;;
+esac
