@@ -124,8 +124,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let repairItem = NSMenuItem(title: "Repair DNS", action: #selector(repairDNS), keyEquivalent: "")
     private let updateItem = NSMenuItem(title: "Check for Updates…", action: #selector(checkForUpdates), keyEquivalent: "")
     private let onDemandItem = NSMenuItem(title: "Connect on Demand", action: #selector(toggleOnDemand), keyEquivalent: "")
-    /// Present while "Connect on Demand" is enabled. Only ever touched on `odQueue`.
-    private var onDemand: OnDemandController?
+    /// The controller as seen from odQueue: set right after a successful arm/reconcile, cleared
+    /// after shutdown. Read and written only on `odQueue`, so a quit can always drain it.
+    private var odOwned: OnDemandController?
     /// Mirror of the controller's state for the main thread (updated via onChange).
     private var odState: OnDemandState = .off
     private var odTunnel: String?
@@ -192,7 +193,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // DNS guard: a reboot or crash with the tunnel up leaves VPN DNS behind; so can waking.
         checkDNS()
         NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { [weak self] _ in
-            self?.odQueue.async { self?.onDemand?.reconcile() }
+            self?.odQueue.async { self?.odOwned?.reconcile() }
             DispatchQueue.main.asyncAfter(deadline: .now() + 3) { self?.checkDNS() }
         }
     }
@@ -356,7 +357,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if odTunnel != nil {
             busy = true; updateIcon()
             odQueue.async {
-                self.onDemand?.manualToggle()
+                self.odOwned?.manualToggle()
                 DispatchQueue.main.async { self.busy = false; self.refresh() }
             }
             return
@@ -392,7 +393,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         guard odTunnel != nil, !odInFlight, !busy else { return }
         odInFlight = true
         odQueue.async {
-            self.onDemand?.tick()
+            self.odOwned?.tick()
             DispatchQueue.main.async { self.odInFlight = false }
         }
     }
@@ -442,15 +443,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     /// Arm the selected tunnel. At launch, adopt the interface's real state first (it may still be up).
     private func startOnDemand(atLaunch: Bool) {
-        guard !tunnel.isEmpty else { return }
+        guard !tunnel.isEmpty else {
+            defaults.set(false, forKey: "onDemand")
+            showError("", "No WireGuard configs found in \(confDir).")
+            return
+        }
         guard OnDemandController.helperInstalled() else {
             defaults.set(false, forKey: "onDemand")
             showError("", OnDemandController.needsHelperMessage)
             return
         }
-        guard let text = try? String(contentsOfFile: confPath(tunnel), encoding: .utf8) else { return }
+        guard let text = try? String(contentsOfFile: confPath(tunnel), encoding: .utf8) else {
+            defaults.set(false, forKey: "onDemand")
+            showError("", "Could not read \(confPath(tunnel)).")
+            return
+        }
         let cidrs = parseAllowedIPs(text)
-        guard !cidrs.isEmpty, !isFullTunnel(cidrs) else {
+        guard !cidrs.isEmpty else {
+            defaults.set(false, forKey: "onDemand")
+            showError("", "The config has no AllowedIPs line.")
+            return
+        }
+        guard !isFullTunnel(cidrs) else {
             defaults.set(false, forKey: "onDemand")
             showError("", "Connect on Demand needs a split-tunnel config (specific AllowedIPs, not 0.0.0.0/0).")
             return
@@ -468,10 +482,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             }
             if atLaunch { od.reconcile() }
             let ok = od.state != .off || od.arm()
+            // Take ownership here, on odQueue: a quit that lands before the main-thread mirrors
+            // are set must still find the live controller and shut it down.
+            if ok { self.odOwned = od }
+            let s = od.state
             DispatchQueue.main.async {
                 self.busy = false
                 if ok {
-                    self.onDemand = od; self.odTunnel = tunnel; self.odState = od.state
+                    self.odTunnel = tunnel; self.odState = s
                     defaults.set(true, forKey: "onDemand")
                 } else {
                     defaults.set(false, forKey: "onDemand")
@@ -483,12 +501,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     /// Take the on-demand interface down and return to classic mode.
     private func stopOnDemand(then completion: (() -> Void)? = nil) {
-        guard let od = onDemand else { completion?(); return }
+        guard odTunnel != nil else { completion?(); return }
         busy = true; updateIcon()
-        onDemand = nil; odTunnel = nil; odState = .off
+        odTunnel = nil; odState = .off
         defaults.set(false, forKey: "onDemand")
         odQueue.async {
-            od.shutdown()
+            self.odOwned?.shutdown()
+            self.odOwned = nil
             DispatchQueue.main.async { self.busy = false; self.refresh(); completion?() }
         }
     }
@@ -503,9 +522,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     /// Quit: an armed interface with nobody watching would black-hole the VPN subnets. Take it down.
+    /// Unconditional, so the queue drains first: an arm still running finishes and is then shut down,
+    /// and a shutdown already queued by `stopOnDemand` completes before the process goes away.
     func applicationWillTerminate(_ notification: Notification) {
-        guard let od = onDemand else { return }
-        odQueue.sync { od.shutdown() }
+        odQueue.sync {
+            self.odOwned?.shutdown()
+            self.odOwned = nil
+        }
     }
 
     /// Pick the folder holding <name>.conf files (for setups outside the default locations).
