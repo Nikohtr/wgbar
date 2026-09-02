@@ -108,6 +108,33 @@ func expect<T: Equatable>(_ actual: T, _ expected: T, _ name: String, file: Stri
             expect(r.errors, ["Wi-Fi: ** Error: nope"], "repair error: surfaced per service")
         }
 
+        // --- apply (on-demand connect sets DNS itself, like wg-quick would) ------------
+        expect(configDNSSearch("DNS = 10.0.0.22, corp.example, 10.0.0.4\nDNS = office.lan\n"),
+               ["corp.example", "office.lan"], "config: search domains are the non-IP DNS entries")
+        expect(configDNSSearch("DNS = 10.0.0.22\n"), [], "config: no search domains")
+        do {
+            let f = Fake(dns: ["Wi-Fi": ["1.1.1.1"], "Bridge": []])
+            let g = DNSGuard(vpnDNS: vpn2, run: f.run)
+            expect(g.apply(servers: ["10.0.0.22", "10.0.0.4"], search: []), [], "apply: no errors")
+            expect(f.calls.contains(["-setdnsservers", "Wi-Fi", "10.0.0.22", "10.0.0.4"]), true, "apply: Wi-Fi gets both servers")
+            expect(f.calls.contains(["-setdnsservers", "Bridge", "10.0.0.22", "10.0.0.4"]), true, "apply: every service gets them")
+            expect(f.calls.contains(["-setsearchdomains", "Wi-Fi", "Empty"]), true, "apply: no search domains → Empty")
+        }
+        do {
+            let f = Fake(dns: ["Wi-Fi": []])
+            let g = DNSGuard(vpnDNS: vpn2, run: f.run)
+            _ = g.apply(servers: ["10.0.0.22"], search: ["corp.example"])
+            expect(f.calls.contains(["-setsearchdomains", "Wi-Fi", "corp.example"]), true, "apply: search domains applied")
+        }
+        do {
+            let f = Fake(dns: ["Wi-Fi": []])
+            let failing: (String, [String]) -> CmdResult = { exe, args in
+                args.first == "-setdnsservers" ? CmdResult(status: 1, output: "** Error: nope") : f.run(exe, args)
+            }
+            expect(DNSGuard(vpnDNS: vpn2, run: failing).apply(servers: ["10.0.0.22"], search: []),
+                   ["Wi-Fi: ** Error: nope"], "apply error: surfaced per service")
+        }
+
         // --- updater (fake git) ------------------------------------------
         func fakeGit(fetchStatus: Int32 = 0, fetchOut: String = "", behind: String = "0", log: String = "", head: String = "7ecd33d")
             -> (String, [String]) -> CmdResult {

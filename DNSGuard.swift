@@ -4,6 +4,7 @@
 // and the only thing that restores the originals is a background monitor shell it leaves
 // running. If that shell dies without its exit trap (shutdown, crash, sleep races) the VPN
 // DNS stays in the system preferences — across reboots — with no tunnel to reach it.
+// On-demand mode (OnDemand.swift) applies and restores DNS through this file instead of wg-quick.
 //
 // Pure functions here are covered by tests/DNSGuardTests.swift (./test.sh).
 
@@ -21,6 +22,19 @@ func configDNSServers(_ text: String) -> [String] {
         }
     }
     return servers
+}
+
+/// The search domains declared by a wg-quick config: `DNS =` entries that are not IP addresses.
+func configDNSSearch(_ text: String) -> [String] {
+    var domains: [String] = []
+    for line in text.split(separator: "\n") {
+        let parts = line.split(separator: "=", maxSplits: 1).map { $0.trimmingCharacters(in: .whitespaces) }
+        guard parts.count == 2, parts[0].lowercased() == "dns" else { continue }
+        for entry in parts[1].split(separator: ",").map({ $0.trimmingCharacters(in: .whitespaces) }) {
+            if !entry.isEmpty, !isIPAddress(entry) { domains.append(entry) }
+        }
+    }
+    return domains
 }
 
 /// IPv4 (digits and dots) or IPv6 (hex digits, colons, optional embedded IPv4) — nothing else.
@@ -98,13 +112,25 @@ struct DNSGuard {
         for s in stale() {
             let servers = snapshot[s]?["servers"] ?? []
             let search = snapshot[s]?["search"] ?? []
-            let r1 = run(networksetup, ["-setdnsservers", s] + (servers.isEmpty ? ["Empty"] : servers))
-            let r2 = run(networksetup, ["-setsearchdomains", s] + (search.isEmpty ? ["Empty"] : search))
-            let failed = [r1, r2].filter { $0.status != 0 || $0.output.contains("Error") }
-            if failed.isEmpty { fixed.append(s) }
-            else { errors.append("\(s): " + failed.map(\.output).joined(separator: "; ")) }
+            if let error = setDNS(s, servers: servers, search: search) { errors.append(error) }
+            else { fixed.append(s) }
         }
         return (fixed, errors)
+    }
+
+    /// Point every network service at the VPN DNS servers, exactly as wg-quick does on `up`.
+    /// Used by on-demand connect, whose armed config carries no DNS line. Returns per-service errors.
+    func apply(servers: [String], search: [String]) -> [String] {
+        services().compactMap { setDNS($0, servers: servers, search: search) }
+    }
+
+    /// Sets one service's DNS servers and search domains; returns an error string or nil.
+    private func setDNS(_ service: String, servers: [String], search: [String]) -> String? {
+        let r1 = run(networksetup, ["-setdnsservers", service] + (servers.isEmpty ? ["Empty"] : servers))
+        let r2 = run(networksetup, ["-setsearchdomains", service] + (search.isEmpty ? ["Empty"] : search))
+        let failed = [r1, r2].filter { $0.status != 0 || $0.output.contains("Error") }
+        guard !failed.isEmpty else { return nil }
+        return "\(service): " + failed.map(\.output).joined(separator: "; ")
     }
 }
 
