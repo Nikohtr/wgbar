@@ -46,6 +46,7 @@ func run(_ exe: String, _ args: [String]) -> CmdResult {
     p.arguments = args
     var env = ProcessInfo.processInfo.environment
     env["PATH"] = "\(brewBin):" + (env["PATH"] ?? "/usr/bin:/bin:/usr/sbin:/sbin")
+    env["GIT_TERMINAL_PROMPT"] = "0"   // never hang waiting for credentials
     p.environment = env
     let pipe = Pipe()
     p.standardOutput = pipe
@@ -114,6 +115,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let tunnelItem = NSMenuItem(title: "Tunnel", action: nil, keyEquivalent: "")
     private let folderItem = NSMenuItem(title: "Config Folder…", action: #selector(chooseFolder), keyEquivalent: "")
     private let repairItem = NSMenuItem(title: "Repair DNS", action: #selector(repairDNS), keyEquivalent: "")
+    private let updateItem = NSMenuItem(title: "Check for Updates…", action: #selector(checkForUpdates), keyEquivalent: "")
     private var tunnel = ""
     private var isUp = false
     private var busy = false
@@ -145,6 +147,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         tunnelItem.submenu = NSMenu()
         folderItem.target = self
         repairItem.target = self
+        updateItem.target = self
         menu.addItem(statusLine)
         menu.addItem(dnsLine)
         menu.addItem(toggleItem)
@@ -153,6 +156,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(tunnelItem)
         menu.addItem(folderItem)
         menu.addItem(loginItem)
+        menu.addItem(updateItem)
         menu.addItem(.separator())
         menu.addItem(NSMenuItem(title: "Quit WGBar", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
 
@@ -273,6 +277,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         dnsLine.title = "VPN DNS left behind on \(dnsIssue.joined(separator: ", "))"
         repairItem.isHidden = isUp
         repairItem.isEnabled = !busy && !dnsChecking
+        updateItem.isEnabled = !busy
         rebuildTunnelSubmenu()
         folderItem.toolTip = confDir
         loginItem.state = SMAppService.mainApp.status == .enabled ? .on : .off
@@ -353,6 +358,75 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         defaults.removeObject(forKey: "tunnel")
         tunnel = ""
         refresh()
+    }
+
+    // MARK: Updates
+
+    /// Fetch the clone this app was installed from and offer to pull + reinstall.
+    @objc private func checkForUpdates() {
+        guard !busy else { return }
+        let updater = Updater(repoDir: defaults.string(forKey: "repoDir") ?? "", run: run)
+        DispatchQueue.global(qos: .userInitiated).async {
+            let status = updater.check()
+            DispatchQueue.main.async { self.present(status, updater) }
+        }
+    }
+
+    private func present(_ status: UpdateStatus, _ updater: Updater) {
+        switch status {
+        case .failed(let message):
+            showError("", "Could not check for updates.\n\(message)")
+        case .upToDate(let revision):
+            showError("", "WGBar is up to date (\(revision)).", style: .informational)
+        case .available(let commits):
+            let alert = NSAlert()
+            alert.messageText = "WGBar update available"
+            alert.informativeText = "\(commits.count) new commit\(commits.count == 1 ? "" : "s"):\n\n"
+                + commits.joined(separator: "\n")
+                + "\n\nUpdate pulls the latest source, rebuilds, and relaunches WGBar."
+            alert.addButton(withTitle: "Update")
+            alert.addButton(withTitle: "Later")
+            NSApp.activate(ignoringOtherApps: true)
+            guard alert.runModal() == .alertFirstButtonReturn else { return }
+            applyUpdate(updater)
+        }
+    }
+
+    private func applyUpdate(_ updater: Updater) {
+        busy = true
+        updateIcon()
+        DispatchQueue.global(qos: .userInitiated).async {
+            if let error = updater.pull() {
+                DispatchQueue.main.async {
+                    self.busy = false
+                    self.updateIcon()
+                    self.showError("", "git pull failed.\n\(error)")
+                }
+                return
+            }
+            // install.sh kills and relaunches WGBar, so it must outlive this process and must not
+            // write to a pipe we hold. Detach it with its output in a log file.
+            let log = NSHomeDirectory() + "/Library/Logs/WGBar-update.log"
+            FileManager.default.createFile(atPath: log, contents: nil)
+            let p = Process()
+            p.executableURL = URL(fileURLWithPath: "/bin/bash")
+            p.arguments = ["./install.sh"]
+            p.currentDirectoryURL = URL(fileURLWithPath: updater.repoDir)
+            var env = ProcessInfo.processInfo.environment
+            env["PATH"] = "\(brewBin):" + (env["PATH"] ?? "/usr/bin:/bin:/usr/sbin:/sbin")
+            p.environment = env
+            let out = FileHandle(forWritingAtPath: log)
+            p.standardOutput = out
+            p.standardError = out
+            p.standardInput = FileHandle.nullDevice
+            do { try p.run() } catch {
+                DispatchQueue.main.async {
+                    self.busy = false
+                    self.updateIcon()
+                    self.showError("", "Could not start install.sh.\n\(error)")
+                }
+            }
+        }
     }
 
     @objc private func toggleLogin() {

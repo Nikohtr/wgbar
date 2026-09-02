@@ -5,7 +5,7 @@ A tiny macOS menu bar toggle for WireGuard tunnels managed by `wg-quick`
 
 - **Left-click** the shield icon to connect / disconnect.
 - **Right-click** for a menu: status and tunnel address, connect/disconnect,
-  pick a tunnel (when you have more than one), launch at login, quit.
+  pick a tunnel (when you have more than one), launch at login, check for updates, quit.
 - Icon: `shield.fill` = connected, `shield.slash` = disconnected.
 
 It is a few hundred lines of Swift with no dependencies beyond Cocoa (`./test.sh` runs the unit tests). It exists because the
@@ -96,6 +96,14 @@ If a repair fails, the icon becomes `exclamationmark.shield` and the right-click
 which service is affected; **Repair DNS** in that menu retries and reports the error.
 
 ## Update
+
+Right-click → **Check for Updates…**. WGBar fetches the git clone it was installed from,
+shows the new commits, and on **Update** pulls them, rebuilds, and relaunches itself (the
+build output goes to `~/Library/Logs/WGBar-update.log`). This needs the clone to still be
+where you ran `install.sh`; if you moved or deleted it, run `./install.sh` from the new
+location once so WGBar learns the path.
+
+The same thing by hand:
 
 ```sh
 cd wgbar && git pull && ./install.sh

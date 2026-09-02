@@ -30,6 +30,7 @@ pkill -x WGBar 2>/dev/null || true
 mkdir -p ~/Applications
 rm -rf ~/Applications/WGBar.app
 cp -R build/WGBar.app ~/Applications/WGBar.app
+defaults write org.wgbar.WGBar repoDir "$PWD"   # lets "Check for Updates…" find this clone
 open ~/Applications/WGBar.app
 echo "Installed and launched ~/Applications/WGBar.app"
 echo "Optional: run ./sudoers.sh to skip the password prompt when toggling."

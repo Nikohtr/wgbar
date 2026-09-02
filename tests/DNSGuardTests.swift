@@ -108,6 +108,31 @@ func expect<T: Equatable>(_ actual: T, _ expected: T, _ name: String, file: Stri
             expect(r.errors, ["Wi-Fi: ** Error: nope"], "repair error: surfaced per service")
         }
 
+        // --- updater (fake git) ------------------------------------------
+        func fakeGit(fetchStatus: Int32 = 0, fetchOut: String = "", behind: String = "0", log: String = "", head: String = "7ecd33d")
+            -> (String, [String]) -> CmdResult {
+            return { exe, args in
+                expect(exe, "/usr/bin/git", "fake git: only git is invoked")
+                expect(args.prefix(2).map { $0 }, ["-C", "/repo"], "fake git: runs in the repo")
+                switch args.dropFirst(2).first {
+                case "fetch":     return CmdResult(status: fetchStatus, output: fetchOut)
+                case "rev-list":  return CmdResult(status: 0, output: behind)
+                case "log":       return CmdResult(status: 0, output: log)
+                case "rev-parse": return CmdResult(status: 0, output: head)
+                default:          return CmdResult(status: 1, output: "** unexpected \(args)")
+                }
+            }
+        }
+        expect(Updater(repoDir: "/repo", run: fakeGit()).check(),
+               .upToDate(revision: "7ecd33d"), "update: nothing new")
+        expect(Updater(repoDir: "/repo", run: fakeGit(behind: "2", log: "abc1234 Fix thing\ndef5678 Add other")).check(),
+               .available(commits: ["abc1234 Fix thing", "def5678 Add other"]), "update: lists new commits")
+        expect(Updater(repoDir: "/repo", run: fakeGit(fetchStatus: 128, fetchOut: "fatal: unable to access")).check(),
+               .failed("fatal: unable to access"), "update: fetch failure surfaced")
+        expect(Updater(repoDir: "", run: fakeGit()).check(),
+               .failed("WGBar does not know where its source checkout is. Run ./install.sh from the wgbar folder once."),
+               "update: no repo recorded")
+
         print("\(passes) passed, \(failures) failed")
         exit(failures == 0 ? 0 : 1)
     }
