@@ -65,4 +65,138 @@ func runOnDemandTests() {
     expect(decide(state: .paused, sticky: false, hasSockets: false, lastSeen: at(0), now: at(10), idle: 30), nil, "decide: paused + quiet but not idle yet → stay")
     expect(decide(state: .paused, sticky: false, hasSockets: false, lastSeen: at(0), now: at(30), idle: 30), .resumeArmed, "decide: paused + idle reached → armed")
     expect(decide(state: .off, sticky: false, hasSockets: true, lastSeen: at(0), now: at(0), idle: 30), nil, "decide: off never acts")
+
+    // --- controller (fake sudo/netstat/ping) ----------------------------------------
+    /// Counts the controller's callbacks.
+    final class Events { var connected = 0, disconnected = 0; var errors: [String] = []; var states: [OnDemandState] = [] }
+    /// Fakes every command the controller runs and records the helper verbs it asked for.
+    final class FakeSystem {
+        var netstat = ""
+        var helperFails: Set<String> = []          // verbs that fail
+        var sudoNeedsPassword = false
+        var statusOutput = "armed"
+        var verbs: [String] = []
+        var pings: [String] = []
+        var clock = Date(timeIntervalSince1970: 1_000_000)
+        func advance(_ s: TimeInterval) { clock = clock.addingTimeInterval(s) }
+        func run(_ exe: String, _ args: [String]) -> CmdResult {
+            switch exe {
+            case "/usr/sbin/netstat": return CmdResult(status: 0, output: netstat)
+            case "/sbin/ping": pings.append(args.last ?? ""); return CmdResult(status: 0, output: "")
+            case "/usr/bin/sudo":
+                expect(Array(args.prefix(2)), ["-n", OnDemandController.helperPath], "controller: sudo -n helper")
+                expect(args.last, "ileasing", "controller: tunnel name passed")
+                if sudoNeedsPassword { return CmdResult(status: 1, output: "sudo: a password is required") }
+                let verb = args[2]; verbs.append(verb)
+                if helperFails.contains(verb) { return CmdResult(status: 1, output: "wg-quick: boom") }
+                return CmdResult(status: 0, output: verb == "status" ? statusOutput : "")
+            default: return CmdResult(status: 1, output: "unexpected \(exe)")
+            }
+        }
+        func controller(kick: String? = "10.0.0.22") -> (OnDemandController, Events) {
+            let ev = Events()
+            let c = OnDemandController(tunnel: "ileasing", allowed: [CIDR("10.0.0.0/24")!, CIDR("10.42.0.0/16")!],
+                                       idle: 30, kick: kick, run: run, now: { self.clock })
+            c.onConnected = { ev.connected += 1 }
+            c.onDisconnected = { ev.disconnected += 1 }
+            c.onError = { ev.errors.append($0) }
+            c.onChange = { ev.states.append($0) }
+            return (c, ev)
+        }
+    }
+    let rdp = "tcp4 0 0 10.42.66.9.60655 10.42.1.9.3389 ESTABLISHED\n"
+    let syn = "tcp4 0 0 10.42.66.9.60700 10.42.1.63.3389 SYN_SENT\n"
+    let web = "tcp4 0 0 10.5.102.162.60773 3.233.158.111.443 ESTABLISHED\n"
+
+    do {   // arm
+        let sys = FakeSystem(); let (c, ev) = sys.controller()
+        expect(c.arm(), true, "arm: succeeds")
+        expect(sys.verbs, ["arm"], "arm: calls helper arm")
+        expect(c.state, .armed, "arm: state armed")
+        expect(ev.states, [.armed], "arm: change reported")
+    }
+    do {   // arm failure
+        let sys = FakeSystem(); sys.helperFails = ["arm"]; let (c, ev) = sys.controller()
+        expect(c.arm(), false, "arm failure: returns false")
+        expect(c.state, .off, "arm failure: state off")
+        expect(ev.errors, ["wg-quick: boom"], "arm failure: helper output surfaced")
+    }
+    do {   // missing sudoers rule
+        let sys = FakeSystem(); sys.sudoNeedsPassword = true; let (c, ev) = sys.controller()
+        c.arm()
+        expect(ev.errors, [OnDemandController.needsHelperMessage], "no sudoers: friendly message")
+    }
+    do {   // full cycle: traffic → connect → quiet → idle → disconnect
+        let sys = FakeSystem(); let (c, ev) = sys.controller()
+        c.arm()
+        sys.netstat = web; c.tick()
+        expect(c.state, .armed, "cycle: unrelated traffic does not connect")
+        sys.netstat = web + syn; c.tick()
+        expect(c.state, .connected, "cycle: SYN_SENT into the tunnel connects")
+        expect(sys.verbs, ["arm", "connect"], "cycle: helper connect called once")
+        expect(sys.pings, ["10.0.0.22"], "cycle: handshake kicked with a ping")
+        expect(ev.connected, 1, "cycle: onConnected fired (DNS applied)")
+        sys.netstat = rdp; sys.advance(600); c.tick()
+        expect(c.state, .connected, "cycle: established session keeps it up")
+        sys.netstat = web; sys.advance(20); c.tick()
+        expect(c.state, .connected, "cycle: 20 s quiet is not idle yet")
+        sys.advance(10); c.tick()
+        expect(c.state, .armed, "cycle: 30 s quiet disconnects back to armed")
+        expect(sys.verbs, ["arm", "connect", "disconnect"], "cycle: helper disconnect called")
+        expect(ev.disconnected, 1, "cycle: onDisconnected fired (DNS restored)")
+        expect(ev.states, [.armed, .connected, .armed], "cycle: state changes reported")
+    }
+    do {   // connect failure → off, no retry loop
+        let sys = FakeSystem(); sys.helperFails = ["connect"]; let (c, ev) = sys.controller()
+        c.arm(); sys.netstat = syn; c.tick(); c.tick()
+        expect(c.state, .off, "connect failure: state off")
+        expect(sys.verbs, ["arm", "connect"], "connect failure: not retried every tick")
+        expect(ev.errors.count, 1, "connect failure: one error")
+        expect(ev.connected, 0, "connect failure: DNS untouched")
+    }
+    do {   // manual connect is sticky; manual disconnect with live sockets pauses
+        let sys = FakeSystem(); let (c, ev) = sys.controller(kick: nil)
+        c.arm()
+        c.manualToggle()
+        expect(c.state, .connected, "manual: click connects")
+        expect(sys.pings, [], "manual: no kick address → no ping")
+        sys.netstat = ""; sys.advance(3600); c.tick()
+        expect(c.state, .connected, "manual: sticky ignores idle")
+        sys.netstat = rdp; c.manualToggle()
+        expect(c.state, .paused, "manual: disconnect while a session exists → paused")
+        expect(ev.disconnected, 1, "manual: DNS restored on manual disconnect")
+        sys.netstat = syn; c.tick(); sys.advance(10); c.tick()
+        expect(c.state, .paused, "manual: reconnect attempts keep it paused")
+        expect(sys.verbs, ["arm", "connect", "disconnect"], "manual: paused does not reconnect")
+        sys.netstat = ""; c.tick(); sys.advance(30); c.tick()
+        expect(c.state, .armed, "manual: quiet for idle → armed again")
+        sys.netstat = syn; c.tick()
+        expect(c.state, .connected, "manual: armed again reacts to new traffic")
+        expect(c.state == .connected && sys.verbs.last == "connect", true, "manual: auto connect after pause")
+    }
+    do {   // manual disconnect with no sockets goes straight to armed
+        let sys = FakeSystem(); let (c, _) = sys.controller()
+        c.arm(); c.manualToggle(); sys.netstat = ""; c.manualToggle()
+        expect(c.state, .armed, "manual: disconnect without sessions → armed")
+    }
+    do {   // reconcile at launch / wake
+        let sys = FakeSystem(); let (c, _) = sys.controller()
+        sys.statusOutput = "off"; c.reconcile(); expect(c.state, .off, "reconcile: off")
+        sys.statusOutput = "armed"; c.reconcile(); expect(c.state, .armed, "reconcile: armed")
+        sys.statusOutput = "Warning: something\nconnected"; c.reconcile(); expect(c.state, .connected, "reconcile: last line wins")
+        sys.netstat = ""; sys.advance(30); c.tick()
+        expect(c.state, .armed, "reconcile: adopted connection is not sticky and idles out")
+    }
+    do {   // shutdown
+        let sys = FakeSystem(); let (c, ev) = sys.controller()
+        c.arm(); sys.netstat = syn; c.tick()
+        c.shutdown()
+        expect(sys.verbs, ["arm", "connect", "down"], "shutdown: connected → down (helper's down handles the peer)")
+        expect(ev.disconnected, 1, "shutdown: DNS restored first")
+        expect(c.state, .off, "shutdown: off")
+        let sys2 = FakeSystem(); let (c2, ev2) = sys2.controller()
+        c2.shutdown()
+        expect(sys2.verbs, [], "shutdown: nothing to do when off")
+        expect(ev2.disconnected, 0, "shutdown: no DNS restore when off")
+    }
 }

@@ -108,3 +108,124 @@ func decide(state: OnDemandState, sticky: Bool, hasSockets: Bool, lastSeen: Date
     case .off:       return nil
     }
 }
+
+// MARK: Controller
+
+/// Drives one tunnel through armed ⇄ connected by polling `netstat` and calling the root helper.
+/// Synchronous; call every method from a single serial queue. Callbacks fire on that queue.
+final class OnDemandController {
+    static let helperPath = "/usr/local/libexec/wgbar-helper"
+    static let needsHelperMessage = "On-Demand needs the WGBar helper.\nRun ./sudoers.sh in the WGBar folder and try again."
+    static func helperInstalled() -> Bool { FileManager.default.isExecutableFile(atPath: helperPath) }
+
+    let tunnel: String
+    let allowed: [CIDR]
+    let idle: TimeInterval
+    /// Pinged right after connect so the handshake starts now instead of at the next TCP retransmit.
+    let kick: String?
+    let run: (String, [String]) -> CmdResult
+    let now: () -> Date
+
+    private(set) var state: OnDemandState = .off
+    private(set) var sticky = false
+    private var lastSeen: Date
+
+    var onConnected: () -> Void = {}
+    var onDisconnected: () -> Void = {}
+    var onError: (String) -> Void = { _ in }
+    var onChange: (OnDemandState) -> Void = { _ in }
+
+    init(tunnel: String, allowed: [CIDR], idle: TimeInterval, kick: String?,
+         run: @escaping (String, [String]) -> CmdResult, now: @escaping () -> Date) {
+        self.tunnel = tunnel; self.allowed = allowed; self.idle = idle; self.kick = kick
+        self.run = run; self.now = now
+        lastSeen = now()
+    }
+
+    private func set(_ s: OnDemandState) {
+        guard s != state else { return }
+        state = s
+        onChange(s)
+    }
+
+    /// `sudo -n wgbar-helper <verb> <tunnel>`. A password prompt means the sudoers rule is missing.
+    private func helper(_ verb: String) -> (ok: Bool, output: String) {
+        let r = run("/usr/bin/sudo", ["-n", Self.helperPath, verb, tunnel])
+        if r.status == 0 { return (true, r.output) }
+        if r.output.contains("password") { return (false, Self.needsHelperMessage) }
+        return (false, r.output.isEmpty ? "wgbar-helper \(verb) failed" : r.output)
+    }
+
+    private func sockets() -> [TCPSocket] {
+        vpnBound(parseNetstat(run("/usr/sbin/netstat", ["-n", "-p", "tcp"]).output), allowed)
+    }
+
+    /// Bring the interface up without an endpoint. False (and `onError`) if the helper failed.
+    @discardableResult func arm() -> Bool {
+        let r = helper("arm")
+        if r.ok { set(.armed) } else { set(.off); onError(r.output) }
+        return r.ok
+    }
+
+    /// Adopt whatever state the interface is actually in (launch, wake).
+    func reconcile() {
+        let r = helper("status")
+        guard r.ok else { set(.off); onError(r.output); return }
+        switch r.output.split(separator: "\n").last.map(String.init) ?? "" {
+        case "connected": sticky = false; lastSeen = now(); set(.connected)
+        case "armed":     set(.armed)
+        default:          set(.off)
+        }
+    }
+
+    /// One poll: look at the sockets, act on `decide`.
+    func tick() {
+        guard state != .off else { return }
+        let has = !sockets().isEmpty
+        let t = now()
+        if has { lastSeen = t }
+        switch decide(state: state, sticky: sticky, hasSockets: has, lastSeen: lastSeen, now: t, idle: idle) {
+        case .connect?:     connect(sticky: false)
+        case .disconnect?:  disconnect()
+        case .resumeArmed?: set(.armed)
+        case nil:           break
+        }
+    }
+
+    /// Left-click: connect (sticky) from armed/paused, disconnect from connected, re-arm from off.
+    func manualToggle() {
+        switch state {
+        case .armed, .paused: connect(sticky: true)
+        case .connected:      disconnect()
+        case .off:            arm()
+        }
+    }
+
+    /// Restore DNS if needed and take the interface down (quit, disable, tunnel change).
+    func shutdown() {
+        guard state != .off else { return }
+        if state == .connected { onDisconnected() }
+        let r = helper("down")
+        if !r.ok { onError(r.output) }
+        set(.off)
+    }
+
+    private func connect(sticky: Bool) {
+        let r = helper("connect")
+        guard r.ok else { set(.off); onError(r.output); return }   // .off: no retry storm
+        self.sticky = sticky
+        lastSeen = now()
+        if let kick { _ = run("/sbin/ping", ["-c", "1", "-W", "1000", kick]) }
+        set(.connected)
+        onConnected()
+    }
+
+    private func disconnect() {
+        onDisconnected()   // put DNS back before the tunnel stops answering
+        let r = helper("disconnect")
+        sticky = false
+        lastSeen = now()
+        guard r.ok else { set(.off); onError(r.output); return }
+        set(sockets().isEmpty ? .armed : .paused)
+    }
+}
