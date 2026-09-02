@@ -3,6 +3,7 @@
 
 import Cocoa
 import ServiceManagement
+import UserNotifications
 
 let defaults = UserDefaults.standard
 
@@ -37,8 +38,6 @@ var confDir: String {
 func confPath(_ tunnel: String) -> String { "\(confDir)/\(tunnel).conf" }
 func runFile(_ tunnel: String)  -> String { "/var/run/wireguard/\(tunnel).name" }
 func availableTunnels() -> [String] { confNames(in: confDir) }
-
-struct CmdResult { let status: Int32; let output: String }
 
 /// Run a command synchronously with Homebrew on PATH, capturing stdout+stderr.
 func run(_ exe: String, _ args: [String]) -> CmdResult {
@@ -75,6 +74,27 @@ func wgQuick(_ action: String, _ tunnel: String) -> String? {
     return r2.output
 }
 
+/// Every DNS server declared by any config in the folder (a stale entry may come from a
+/// tunnel other than the selected one).
+func allConfigDNS() -> Set<String> {
+    var all = Set<String>()
+    for name in availableTunnels() {
+        if let text = try? String(contentsOfFile: confPath(name), encoding: .utf8) { all.formUnion(configDNSServers(text)) }
+    }
+    return all
+}
+
+/// True while any wg-quick tunnel is up (not only the selected one), when VPN DNS is legitimate.
+func anyTunnelUp() -> Bool {
+    let names = (try? FileManager.default.contentsOfDirectory(atPath: "/var/run/wireguard")) ?? []
+    return names.contains { $0.hasSuffix(".name") }
+}
+
+let networkPrefs = "/Library/Preferences/SystemConfiguration/preferences.plist"
+func networkPrefsModified() -> Date {
+    (try? FileManager.default.attributesOfItem(atPath: networkPrefs))?[.modificationDate] as? Date ?? .distantPast
+}
+
 func tunnelAddress(_ tunnel: String) -> String? {
     guard let text = try? String(contentsOfFile: confPath(tunnel), encoding: .utf8) else { return nil }
     for line in text.split(separator: "\n") {
@@ -88,13 +108,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var statusItem: NSStatusItem!
     private let menu = NSMenu()
     private let statusLine = NSMenuItem(title: "", action: nil, keyEquivalent: "")
+    private let dnsLine    = NSMenuItem(title: "", action: nil, keyEquivalent: "")
     private let toggleItem = NSMenuItem(title: "", action: #selector(toggle), keyEquivalent: "")
     private let loginItem  = NSMenuItem(title: "Launch at Login", action: #selector(toggleLogin), keyEquivalent: "")
     private let tunnelItem = NSMenuItem(title: "Tunnel", action: nil, keyEquivalent: "")
     private let folderItem = NSMenuItem(title: "Config Folder…", action: #selector(chooseFolder), keyEquivalent: "")
+    private let repairItem = NSMenuItem(title: "Repair DNS", action: #selector(repairDNS), keyEquivalent: "")
     private var tunnel = ""
     private var isUp = false
     private var busy = false
+    /// Services still pointing at VPN DNS that could not be repaired automatically.
+    private var dnsIssue: [String] = []
+    private var dnsChecking = false
+    private var prefsSeen = networkPrefsModified()
 
     /// The tunnel to control: the remembered choice if its config still exists, else the first one found.
     private func resolveTunnel() {
@@ -113,12 +139,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         menu.delegate = self
         statusLine.isEnabled = false
+        dnsLine.isEnabled = false
         toggleItem.target = self
         loginItem.target = self
         tunnelItem.submenu = NSMenu()
         folderItem.target = self
+        repairItem.target = self
         menu.addItem(statusLine)
+        menu.addItem(dnsLine)
         menu.addItem(toggleItem)
+        menu.addItem(repairItem)
         menu.addItem(.separator())
         menu.addItem(tunnelItem)
         menu.addItem(folderItem)
@@ -135,25 +165,88 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         resolveTunnel()
         refresh()
         Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in self?.refresh() }
+
+        // DNS guard: a reboot or crash with the tunnel up leaves VPN DNS behind; so can waking.
+        checkDNS()
+        NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { [weak self] _ in
+            DispatchQueue.main.asyncAfter(deadline: .now() + 3) { self?.checkDNS() }
+        }
     }
 
     // MARK: State
 
     private func refresh() {
         if tunnel.isEmpty { resolveTunnel() }
+        let wasUp = isUp
         isUp = !tunnel.isEmpty && FileManager.default.fileExists(atPath: runFile(tunnel))
         updateIcon()
+        // The tunnel went down outside WGBar, or the network preferences changed: re-check DNS.
+        let prefsNow = networkPrefsModified()
+        if (wasUp && !isUp) || prefsNow != prefsSeen {
+            prefsSeen = prefsNow
+            DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in self?.checkDNS() }
+        }
     }
 
     private func updateIcon() {
-        let name = busy ? "shield.lefthalf.filled" : (isUp ? "shield.fill" : "shield.slash")
+        let name = busy ? "shield.lefthalf.filled"
+            : isUp ? "shield.fill"
+            : dnsIssue.isEmpty ? "shield.slash" : "exclamationmark.shield"
         let desc = busy ? "WireGuard switching" : (isUp ? "WireGuard on" : "WireGuard off")
         let image = NSImage(systemSymbolName: name, accessibilityDescription: desc)
         image?.isTemplate = true
         statusItem.button?.image = image
         statusItem.button?.toolTip = tunnel.isEmpty
             ? "No WireGuard configs found in \(confDir)"
+            : !dnsIssue.isEmpty && !isUp
+            ? "VPN DNS left behind on \(dnsIssue.joined(separator: ", ")) — right-click → Repair DNS"
             : "\(tunnel): \(isUp ? "connected" : "disconnected") — click to toggle"
+    }
+
+    // MARK: DNS guard
+
+    /// If no tunnel is up but some network service still points at a VPN DNS server, restore
+    /// that service's pre-connect DNS (or clear it, i.e. back to DHCP) and say so.
+    private func checkDNS(interactive: Bool = false) {
+        guard !busy, !dnsChecking, !anyTunnelUp() else { return }
+        let vpnDNS = allConfigDNS()
+        guard !vpnDNS.isEmpty else { return }
+        dnsChecking = true
+        let snapshot = defaults.dictionary(forKey: "dnsSnapshot") as? DNSSnapshot ?? [:]
+        DispatchQueue.global(qos: .utility).async {
+            let guardian = DNSGuard(vpnDNS: vpnDNS, run: run)
+            let stale = guardian.stale()
+            let result = stale.isEmpty ? (fixed: [], errors: []) : guardian.repair(snapshot: snapshot)
+            let stillStale = stale.isEmpty ? [] : guardian.stale()
+            DispatchQueue.main.async {
+                self.dnsChecking = false
+                self.dnsIssue = stillStale
+                self.prefsSeen = networkPrefsModified()   // our own repair changed the file; don't loop on it
+                self.updateIcon()
+                if !result.fixed.isEmpty {
+                    self.notify("Restored DNS on \(result.fixed.joined(separator: ", ")) that WireGuard left behind.")
+                }
+                if !result.errors.isEmpty, interactive {
+                    self.showError("", "Could not repair DNS:\n" + result.errors.joined(separator: "\n"))
+                } else if stale.isEmpty, interactive {
+                    self.showError("", "DNS is clean — no VPN servers left behind.", style: .informational)
+                }
+            }
+        }
+    }
+
+    @objc private func repairDNS() { checkDNS(interactive: true) }
+
+    private func notify(_ body: String) {
+        guard Bundle.main.bundleIdentifier != nil else { return }   // UNUserNotificationCenter needs a bundle
+        let center = UNUserNotificationCenter.current()
+        center.requestAuthorization(options: [.alert]) { granted, _ in
+            guard granted else { return }
+            let content = UNMutableNotificationContent()
+            content.title = "WGBar"
+            content.body = body
+            center.add(UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil))
+        }
     }
 
     // MARK: Actions
@@ -176,6 +269,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             toggleItem.title = isUp ? "Disconnect" : "Connect"
             toggleItem.isEnabled = !busy
         }
+        dnsLine.isHidden = isUp || dnsIssue.isEmpty
+        dnsLine.title = "VPN DNS left behind on \(dnsIssue.joined(separator: ", "))"
+        repairItem.isHidden = isUp
+        repairItem.isEnabled = !busy && !dnsChecking
         rebuildTunnelSubmenu()
         folderItem.toolTip = confDir
         loginItem.state = SMAppService.mainApp.status == .enabled ? .on : .off
@@ -219,12 +316,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         updateIcon()
         let action = isUp ? "down" : "up"
         let tunnel = self.tunnel
+        let vpnDNS = allConfigDNS()
         DispatchQueue.global(qos: .userInitiated).async {
+            // Remember the DNS settings to put back, before wg-quick overwrites them.
+            if action == "up", !vpnDNS.isEmpty, !anyTunnelUp() {
+                defaults.set(DNSGuard(vpnDNS: vpnDNS, run: run).snapshot(), forKey: "dnsSnapshot")
+            }
             let error = wgQuick(action, tunnel)
             DispatchQueue.main.async {
                 self.busy = false
                 self.refresh()
                 if let error { self.showError(action, error) }
+                // Give wg-quick's own monitor a moment to restore DNS; fix whatever it did not.
+                if action == "down" { DispatchQueue.main.asyncAfter(deadline: .now() + 3) { self.checkDNS() } }
             }
         }
     }
@@ -263,9 +367,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
-    private func showError(_ what: String, _ message: String) {
+    private func showError(_ what: String, _ message: String, style: NSAlert.Style = .warning) {
         let alert = NSAlert()
-        alert.alertStyle = .warning
+        alert.alertStyle = style
         alert.messageText = what.isEmpty ? "WGBar" : "wg-quick \(what) \(tunnel) failed"
         alert.informativeText = message
         NSApp.activate(ignoringOtherApps: true)

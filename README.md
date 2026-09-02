@@ -8,7 +8,7 @@ A tiny macOS menu bar toggle for WireGuard tunnels managed by `wg-quick`
   pick a tunnel (when you have more than one), launch at login, quit.
 - Icon: `shield.fill` = connected, `shield.slash` = disconnected.
 
-It is ~200 lines of Swift with no dependencies beyond Cocoa. It exists because the
+It is a few hundred lines of Swift with no dependencies beyond Cocoa (`./test.sh` runs the unit tests). It exists because the
 App Store WireGuard app uses its own tunnel stack (not your `wg-quick` configs), and
 the other menu bar options are unmaintained.
 
@@ -74,6 +74,26 @@ defaults write org.wgbar.WGBar confDir /path/to/wireguard   # config folder
 defaults write org.wgbar.WGBar wgQuick /path/to/wg-quick    # non-standard wg-quick
 defaults delete org.wgbar.WGBar confDir                     # back to auto-detect
 ```
+
+## DNS left behind (and the fix)
+
+`wg-quick` on macOS applies your config's `DNS =` servers to **every** network service, and
+the only thing that puts the old DNS back is a background monitor process it leaves running.
+If that process dies without cleaning up (shutdown or logout with the tunnel up, a crash,
+sleep/wake races), the VPN DNS stays set in System Settings — across reboots — and with no
+tunnel to reach it, nothing resolves. The usual symptom: "no internet" until you clear the DNS
+servers by hand in Wi-Fi ▸ Details ▸ DNS.
+
+WGBar repairs this automatically. When no tunnel is up but a network service still lists a
+DNS address from one of your configs, WGBar puts that service back to what it had before the
+last connect (or clears it, which means DHCP-provided DNS) and posts a notification. It checks
+at launch, after waking from sleep, when a tunnel goes down, and whenever the system network
+preferences change. It touches nothing that is not a VPN address from your configs, so DNS
+servers you set yourself are left alone. No password is needed: macOS lets admin users change
+DNS settings directly.
+
+If a repair fails, the icon becomes `exclamationmark.shield` and the right-click menu shows
+which service is affected; **Repair DNS** in that menu retries and reports the error.
 
 ## Update
 
