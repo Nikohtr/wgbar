@@ -8,24 +8,39 @@ import Foundation
 
 // MARK: Sockets
 
-/// One line of `netstat -n -p tcp`: the connection state and the remote end.
+/// One TCP socket as reported by lsof: the connection state and the remote end.
 struct TCPSocket: Equatable {
     let state: String
     let remoteIP: String
     let remotePort: Int
 }
 
-/// Parses `netstat -n -p tcp` output. Header, LISTEN (`*.*`) and malformed lines are skipped.
-func parseNetstat(_ output: String) -> [TCPSocket] {
+/// The command whose output `parseLsof` reads. lsof is used instead of `netstat -p tcp` because
+/// on macOS 27 the kernel hands netstat an empty socket list when any ancestor process is an
+/// ad-hoc signed binary (as WGBar.app is), while lsof's per-process lookup still works.
+let lsofArgs = ["-nP", "-iTCP", "-sTCP:SYN_SENT,ESTABLISHED", "-F", "nT"]
+
+/// Parses `lsof -F nT` output: an `n<local>-><remote>` line followed by `TST=<state>` per socket.
+/// Records without a remote end (LISTEN, `*:port`) or without a state line are skipped.
+func parseLsof(_ output: String) -> [TCPSocket] {
     var result: [TCPSocket] = []
+    var pending: (ip: String, port: Int)?
     for line in output.split(separator: "\n") {
-        let f = line.split(separator: " ", omittingEmptySubsequences: true).map(String.init)
-        guard f.count >= 6, f[0].hasPrefix("tcp") else { continue }
-        let remote = f[4]
-        guard let dot = remote.lastIndex(of: "."), let port = Int(remote[remote.index(after: dot)...]) else { continue }
-        var ip = String(remote[..<dot])
-        if let pct = ip.firstIndex(of: "%") { ip = String(ip[..<pct]) }   // fe80::1%lo0
-        result.append(TCPSocket(state: f[5], remoteIP: ip, remotePort: port))
+        if line.hasPrefix("n") {
+            pending = nil
+            guard let arrow = line.range(of: "->") else { continue }
+            let remote = line[arrow.upperBound...]
+            guard let colon = remote.lastIndex(of: ":"), let port = Int(remote[remote.index(after: colon)...]) else { continue }
+            var ip = String(remote[..<colon])
+            if ip.hasPrefix("["), ip.hasSuffix("]") { ip = String(ip.dropFirst().dropLast()) }   // [fe80::1%lo0]
+            if let pct = ip.firstIndex(of: "%") { ip = String(ip[..<pct]) }
+            pending = (ip, port)
+        } else if line.hasPrefix("TST="), let p = pending {
+            result.append(TCPSocket(state: String(line.dropFirst(4)), remoteIP: p.ip, remotePort: p.port))
+            pending = nil
+        } else if line.hasPrefix("p") || line.hasPrefix("f") {
+            pending = nil
+        }
     }
     return result
 }
@@ -111,7 +126,7 @@ func decide(state: OnDemandState, sticky: Bool, hasSockets: Bool, lastSeen: Date
 
 // MARK: Controller
 
-/// Drives one tunnel through armed ⇄ connected by polling `netstat` and calling the root helper.
+/// Drives one tunnel through armed ⇄ connected by polling `lsof` and calling the root helper.
 /// Synchronous; call every method from a single serial queue. Callbacks fire on that queue.
 final class OnDemandController {
     static let helperPath = "/usr/local/libexec/wgbar-helper"
@@ -156,11 +171,11 @@ final class OnDemandController {
         return (false, r.output.isEmpty ? "wgbar-helper \(verb) failed" : r.output)
     }
 
-    /// nil when `netstat` itself failed — a failed read must not be mistaken for "no traffic".
+    /// nil when `lsof` itself failed — a failed read must not be mistaken for "no traffic".
     private func sockets() -> [TCPSocket]? {
-        let r = run("/usr/sbin/netstat", ["-n", "-p", "tcp"])
+        let r = run("/usr/sbin/lsof", lsofArgs)
         guard r.status == 0 else { return nil }
-        return vpnBound(parseNetstat(r.output), allowed)
+        return vpnBound(parseLsof(r.output), allowed)
     }
 
     /// Bring the interface up without an endpoint. False (and `onError`) if the helper failed.
@@ -182,7 +197,7 @@ final class OnDemandController {
         }
     }
 
-    /// One poll: look at the sockets, act on `decide`. Skipped (state unchanged) if `netstat` fails.
+    /// One poll: look at the sockets, act on `decide`. Skipped (state unchanged) if `lsof` fails.
     func tick() {
         guard state != .off else { return }
         guard let socks = sockets() else { return }

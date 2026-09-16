@@ -2,24 +2,39 @@
 import Foundation
 
 func runOnDemandTests() {
-    // --- netstat -----------------------------------------------------------
-    let netstat = """
-    Active Internet connections
-    Proto Recv-Q Send-Q  Local Address          Foreign Address        (state)
-    tcp4       0      0  10.42.66.9.60655       10.42.1.9.3389         ESTABLISHED
-    tcp4       0      0  10.5.102.162.60773     3.233.158.111.443      ESTABLISHED
-    tcp4       0      0  10.42.66.9.60700       10.42.1.63.3389        SYN_SENT
-    tcp4       0      0  10.5.102.162.60760     160.79.104.10.443      TIME_WAIT
-    tcp6       0      0  fe80::1%lo0.1024       fe80::1%lo0.1025       ESTABLISHED
-    tcp4       0      0  *.5000                 *.*                    LISTEN
-    tcp46      0      0  *.7000                 *.*                    LISTEN
+    // --- lsof --------------------------------------------------------------
+    // `lsof -nP -iTCP -sTCP:SYN_SENT,ESTABLISHED -F nT`: one p/f/n/T record group per socket.
+    let lsof = """
+    p1657
+    f63
+    n10.42.66.9:60655->10.42.1.9:3389
+    TST=ESTABLISHED
+    TQR=0
+    TQS=0
+    f64
+    n10.5.102.162:60773->3.233.158.111:443
+    TST=ESTABLISHED
+    p1732
+    f24
+    n10.42.66.9:60700->10.42.1.63:3389
+    TST=SYN_SENT
+    TQR=0
+    TQS=0
+    f25
+    n*:5000
+    TST=LISTEN
+    f26
+    n[fe80::1%lo0]:1024->[fe80::1%lo0]:1025
+    TST=ESTABLISHED
+    f27
+    n10.5.102.162:60760->160.79.104.10:443
     """
-    let sockets = parseNetstat(netstat)
-    expect(sockets.count, 5, "netstat: header and LISTEN lines skipped")
-    expect(sockets.first, TCPSocket(state: "ESTABLISHED", remoteIP: "10.42.1.9", remotePort: 3389), "netstat: ip and port split at the last dot")
-    expect(sockets[2], TCPSocket(state: "SYN_SENT", remoteIP: "10.42.1.63", remotePort: 3389), "netstat: SYN_SENT parsed")
-    expect(sockets[4], TCPSocket(state: "ESTABLISHED", remoteIP: "fe80::1", remotePort: 1025), "netstat: IPv6 scope id stripped")
-    expect(parseNetstat(""), [], "netstat: empty output")
+    let sockets = parseLsof(lsof)
+    expect(sockets.count, 4, "lsof: LISTEN (no ->) and records without a state are skipped")
+    expect(sockets.first, TCPSocket(state: "ESTABLISHED", remoteIP: "10.42.1.9", remotePort: 3389), "lsof: remote ip and port split at the last colon")
+    expect(sockets[2], TCPSocket(state: "SYN_SENT", remoteIP: "10.42.1.63", remotePort: 3389), "lsof: SYN_SENT parsed")
+    expect(sockets[3], TCPSocket(state: "ESTABLISHED", remoteIP: "fe80::1", remotePort: 1025), "lsof: IPv6 brackets and scope id stripped")
+    expect(parseLsof(""), [], "lsof: empty output")
 
     // --- CIDR ----------------------------------------------------------------
     expect(ipBytes("10.0.0.22"), [10, 0, 0, 22], "ip: v4 bytes")
@@ -66,13 +81,13 @@ func runOnDemandTests() {
     expect(decide(state: .paused, sticky: false, hasSockets: false, lastSeen: at(0), now: at(30), idle: 30), .resumeArmed, "decide: paused + idle reached → armed")
     expect(decide(state: .off, sticky: false, hasSockets: true, lastSeen: at(0), now: at(0), idle: 30), nil, "decide: off never acts")
 
-    // --- controller (fake sudo/netstat/ping) ----------------------------------------
+    // --- controller (fake sudo/lsof/ping) ----------------------------------------
     /// Counts the controller's callbacks; `log` records callback/helper-verb order.
     final class Events { var connected = 0, disconnected = 0; var errors: [String] = []; var states: [OnDemandState] = []; var log: [String] = [] }
     /// Fakes every command the controller runs and records the helper verbs it asked for.
     final class FakeSystem {
-        var netstat = ""
-        var netstatFails = false
+        var lsof = ""
+        var lsofFails = false
         var helperFails: Set<String> = []          // verbs that fail
         var sudoNeedsPassword = false
         var statusOutput = "armed"
@@ -83,7 +98,9 @@ func runOnDemandTests() {
         func advance(_ s: TimeInterval) { clock = clock.addingTimeInterval(s) }
         func run(_ exe: String, _ args: [String]) -> CmdResult {
             switch exe {
-            case "/usr/sbin/netstat": return netstatFails ? CmdResult(status: 1, output: "") : CmdResult(status: 0, output: netstat)
+            case "/usr/sbin/lsof":
+                expect(args, ["-nP", "-iTCP", "-sTCP:SYN_SENT,ESTABLISHED", "-F", "nT"], "controller: lsof asked for TCP sockets in field format")
+                return lsofFails ? CmdResult(status: 1, output: "") : CmdResult(status: 0, output: lsof)
             case "/sbin/ping": pings.append(args.last ?? ""); return CmdResult(status: 0, output: "")
             case "/usr/bin/sudo":
                 expect(Array(args.prefix(2)), ["-n", OnDemandController.helperPath], "controller: sudo -n helper")
@@ -107,9 +124,9 @@ func runOnDemandTests() {
             return (c, ev)
         }
     }
-    let rdp = "tcp4 0 0 10.42.66.9.60655 10.42.1.9.3389 ESTABLISHED\n"
-    let syn = "tcp4 0 0 10.42.66.9.60700 10.42.1.63.3389 SYN_SENT\n"
-    let web = "tcp4 0 0 10.5.102.162.60773 3.233.158.111.443 ESTABLISHED\n"
+    let rdp = "p1\nf3\nn10.42.66.9:60655->10.42.1.9:3389\nTST=ESTABLISHED\n"
+    let syn = "p1\nf4\nn10.42.66.9:60700->10.42.1.63:3389\nTST=SYN_SENT\n"
+    let web = "p2\nf5\nn10.5.102.162:60773->3.233.158.111:443\nTST=ESTABLISHED\n"
 
     do {   // arm
         let sys = FakeSystem(); let (c, ev) = sys.controller()
@@ -132,17 +149,17 @@ func runOnDemandTests() {
     do {   // full cycle: traffic → connect → quiet → idle → disconnect
         let sys = FakeSystem(); let (c, ev) = sys.controller()
         c.arm()
-        sys.netstat = web; c.tick()
+        sys.lsof = web; c.tick()
         expect(c.state, .armed, "cycle: unrelated traffic does not connect")
-        sys.netstat = web + syn; c.tick()
+        sys.lsof = web + syn; c.tick()
         expect(c.state, .connected, "cycle: SYN_SENT into the tunnel connects")
         expect(sys.verbs, ["arm", "connect"], "cycle: helper connect called once")
         expect(sys.pings, ["10.0.0.22"], "cycle: handshake kicked with a ping")
         expect(ev.connected, 1, "cycle: onConnected fired (DNS applied)")
         expect(ev.log, ["arm", "connect", "onConnected"], "cycle: onConnected fires after helper connect")
-        sys.netstat = rdp; sys.advance(600); c.tick()
+        sys.lsof = rdp; sys.advance(600); c.tick()
         expect(c.state, .connected, "cycle: established session keeps it up")
-        sys.netstat = web; sys.advance(20); c.tick()
+        sys.lsof = web; sys.advance(20); c.tick()
         expect(c.state, .connected, "cycle: 20 s quiet is not idle yet")
         sys.advance(10); c.tick()
         expect(c.state, .armed, "cycle: 30 s quiet disconnects back to armed")
@@ -153,7 +170,7 @@ func runOnDemandTests() {
     }
     do {   // connect failure → off, no retry loop
         let sys = FakeSystem(); sys.helperFails = ["connect"]; let (c, ev) = sys.controller()
-        c.arm(); sys.netstat = syn; c.tick(); c.tick()
+        c.arm(); sys.lsof = syn; c.tick(); c.tick()
         expect(c.state, .off, "connect failure: state off")
         expect(sys.verbs, ["arm", "connect"], "connect failure: not retried every tick")
         expect(ev.errors.count, 1, "connect failure: one error")
@@ -165,23 +182,23 @@ func runOnDemandTests() {
         c.manualToggle()
         expect(c.state, .connected, "manual: click connects")
         expect(sys.pings, [], "manual: no kick address → no ping")
-        sys.netstat = ""; sys.advance(3600); c.tick()
+        sys.lsof = ""; sys.advance(3600); c.tick()
         expect(c.state, .connected, "manual: sticky ignores idle")
-        sys.netstat = rdp; c.manualToggle()
+        sys.lsof = rdp; c.manualToggle()
         expect(c.state, .paused, "manual: disconnect while a session exists → paused")
         expect(ev.disconnected, 1, "manual: DNS restored on manual disconnect")
-        sys.netstat = syn; c.tick(); sys.advance(10); c.tick()
+        sys.lsof = syn; c.tick(); sys.advance(10); c.tick()
         expect(c.state, .paused, "manual: reconnect attempts keep it paused")
         expect(sys.verbs, ["arm", "connect", "disconnect"], "manual: paused does not reconnect")
-        sys.netstat = ""; c.tick(); sys.advance(30); c.tick()
+        sys.lsof = ""; c.tick(); sys.advance(30); c.tick()
         expect(c.state, .armed, "manual: quiet for idle → armed again")
-        sys.netstat = syn; c.tick()
+        sys.lsof = syn; c.tick()
         expect(c.state, .connected, "manual: armed again reacts to new traffic")
         expect(c.state == .connected && sys.verbs.last == "connect", true, "manual: auto connect after pause")
     }
     do {   // manual disconnect with no sockets goes straight to armed
         let sys = FakeSystem(); let (c, _) = sys.controller()
-        c.arm(); c.manualToggle(); sys.netstat = ""; c.manualToggle()
+        c.arm(); c.manualToggle(); sys.lsof = ""; c.manualToggle()
         expect(c.state, .armed, "manual: disconnect without sessions → armed")
     }
     do {   // reconcile at launch / wake
@@ -189,7 +206,7 @@ func runOnDemandTests() {
         sys.statusOutput = "off"; c.reconcile(); expect(c.state, .off, "reconcile: off")
         sys.statusOutput = "armed"; c.reconcile(); expect(c.state, .armed, "reconcile: armed")
         sys.statusOutput = "Warning: something\nconnected"; c.reconcile(); expect(c.state, .connected, "reconcile: last line wins")
-        sys.netstat = ""; sys.advance(30); c.tick()
+        sys.lsof = ""; sys.advance(30); c.tick()
         expect(c.state, .armed, "reconcile: adopted connection is not sticky and idles out")
     }
     do {   // reconcile over an already-connected sticky controller keeps it sticky
@@ -197,13 +214,13 @@ func runOnDemandTests() {
         c.arm(); c.manualToggle()
         expect(c.state, .connected, "reconcile sticky: manual connect first")
         sys.statusOutput = "connected"; c.reconcile()
-        sys.netstat = ""; sys.advance(3600); c.tick()
+        sys.lsof = ""; sys.advance(3600); c.tick()
         expect(c.state, .connected, "reconcile: a re-confirmed manual connection stays sticky")
         expect(sys.verbs.contains("disconnect"), false, "reconcile: sticky connection is not idled out")
     }
     do {   // shutdown
         let sys = FakeSystem(); let (c, ev) = sys.controller()
-        c.arm(); sys.netstat = syn; c.tick()
+        c.arm(); sys.lsof = syn; c.tick()
         c.shutdown()
         expect(sys.verbs, ["arm", "connect", "down"], "shutdown: connected → down (helper's down handles the peer)")
         expect(ev.disconnected, 1, "shutdown: DNS restored first")
@@ -222,9 +239,9 @@ func runOnDemandTests() {
     }
     do {   // failing disconnect still restores DNS and goes off
         let sys = FakeSystem(); sys.helperFails = ["disconnect"]; let (c, ev) = sys.controller()
-        c.arm(); sys.netstat = syn; c.tick()
+        c.arm(); sys.lsof = syn; c.tick()
         expect(c.state, .connected, "failing disconnect: connected first")
-        sys.netstat = ""; sys.advance(30); c.tick()
+        sys.lsof = ""; sys.advance(30); c.tick()
         expect(c.state, .off, "failing disconnect: state off")
         expect(ev.disconnected, 1, "failing disconnect: DNS restored anyway")
         expect(ev.errors, ["wg-quick: boom"], "failing disconnect: helper output surfaced")
@@ -235,13 +252,13 @@ func runOnDemandTests() {
         expect(c.state, .off, "failing reconcile: state off")
         expect(ev.errors, ["wg-quick: boom"], "failing reconcile: helper output surfaced")
     }
-    do {   // netstat failure during a tick is treated as unknown, not quiet — no idle disconnect
+    do {   // lsof failure during a tick is treated as unknown, not quiet — no idle disconnect
         let sys = FakeSystem(); let (c, ev) = sys.controller()
-        c.arm(); sys.netstat = syn; c.tick()
-        expect(c.state, .connected, "netstat failure: connected first")
-        sys.netstatFails = true; sys.advance(3600); c.tick()
-        expect(c.state, .connected, "netstat failure: stays connected, does not idle out")
-        expect(sys.verbs, ["arm", "connect"], "netstat failure: no disconnect verb called")
-        expect(ev.disconnected, 0, "netstat failure: DNS untouched")
+        c.arm(); sys.lsof = syn; c.tick()
+        expect(c.state, .connected, "lsof failure: connected first")
+        sys.lsofFails = true; sys.advance(3600); c.tick()
+        expect(c.state, .connected, "lsof failure: stays connected, does not idle out")
+        expect(sys.verbs, ["arm", "connect"], "lsof failure: no disconnect verb called")
+        expect(ev.disconnected, 0, "lsof failure: DNS untouched")
     }
 }

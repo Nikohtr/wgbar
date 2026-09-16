@@ -162,7 +162,8 @@ its settings, the helper and the sudoers rule (if installed).
 - Toggling runs `sudo -n wg-quick up|down <folder>/<name>.conf`; if that fails for lack of
   a sudoers rule it falls back to `osascript ... with administrator privileges`.
 - Login item uses `SMAppService` (hence macOS 13+).
-- Connect on Demand polls `netstat -n -p tcp` once a second and calls
+- Connect on Demand polls `lsof -nP -iTCP -sTCP:SYN_SENT,ESTABLISHED` once a second
+  (netstat returns an empty list to ad-hoc signed apps on macOS 27) and calls
   `sudo -n /usr/local/libexec/wgbar-helper arm|connect|disconnect|down|status <tunnel>`;
   the helper derives an "armed" config (no `DNS`, `Endpoint`, `PersistentKeepalive`) from
   yours for `wg-quick up`, and uses `wg set` for connect/disconnect. WGBar applies and
