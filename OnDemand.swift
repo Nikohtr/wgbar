@@ -18,7 +18,12 @@ struct TCPSocket: Equatable {
 /// The command whose output `parseLsof` reads. lsof is used instead of `netstat -p tcp` because
 /// on macOS 27 the kernel hands netstat an empty socket list when any ancestor process is an
 /// ad-hoc signed binary (as WGBar.app is), while lsof's per-process lookup still works.
-let lsofArgs = ["-nP", "-iTCP", "-sTCP:SYN_SENT,ESTABLISHED", "-F", "nT"]
+///
+/// Deliberately no `-sTCP:SYN_SENT,ESTABLISHED`: lsof treats each listed state as a search item
+/// and exits 1 ("TCP state not located: SYN_SENT") whenever one has no socket. SYN_SENT exists
+/// only for the instant a connection opens, so with the filter every quiet tick looked like a
+/// failed read and a connected tunnel never idled out. `vpnBound` filters the states instead.
+let lsofArgs = ["-nP", "-iTCP", "-F", "nT"]
 
 /// Parses `lsof -F nT` output: an `n<local>-><remote>` line followed by `TST=<state>` per socket.
 /// Records without a remote end (LISTEN, `*:port`) or without a state line are skipped.
@@ -172,9 +177,11 @@ final class OnDemandController {
     }
 
     /// nil when `lsof` itself failed — a failed read must not be mistaken for "no traffic".
+    /// lsof also exits 1 when simply nothing matched `-iTCP`; then it prints nothing (errors always
+    /// come with a message on stderr, which `run` merges into `output`), and that is "no traffic".
     private func sockets() -> [TCPSocket]? {
         let r = run("/usr/sbin/lsof", lsofArgs)
-        guard r.status == 0 else { return nil }
+        guard r.status == 0 || (r.status == 1 && r.output.isEmpty) else { return nil }
         return vpnBound(parseLsof(r.output), allowed)
     }
 

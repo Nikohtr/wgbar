@@ -86,7 +86,7 @@ Manual left-click in On-Demand mode:
 
 ## 2. Triggers
 
-While in On-Demand mode WGBar polls `lsof -nP -iTCP -sTCP:SYN_SENT,ESTABLISHED` every 1 s
+While in On-Demand mode WGBar polls `lsof -nP -iTCP` every 1 s
 (no root required; `netstat` was used originally, but macOS 27 gives ad-hoc signed apps an empty list)
 and keeps the sockets whose remote address is inside the tunnel's `AllowedIPs`.
 

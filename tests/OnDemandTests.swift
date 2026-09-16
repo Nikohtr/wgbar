@@ -99,8 +99,12 @@ func runOnDemandTests() {
         func run(_ exe: String, _ args: [String]) -> CmdResult {
             switch exe {
             case "/usr/sbin/lsof":
-                expect(args, ["-nP", "-iTCP", "-sTCP:SYN_SENT,ESTABLISHED", "-F", "nT"], "controller: lsof asked for TCP sockets in field format")
-                return lsofFails ? CmdResult(status: 1, output: "") : CmdResult(status: 0, output: lsof)
+                // No -s state filter: lsof exits 1 ("TCP state not located") whenever a listed state
+                // has no socket, and SYN_SENT is almost never present. States are filtered in vpnBound.
+                expect(args, ["-nP", "-iTCP", "-F", "nT"], "controller: lsof asked for all TCP sockets in field format, no -s")
+                if lsofFails { return CmdResult(status: 1, output: "lsof: can't open /dev/mem") }
+                // lsof exits 1 with nothing printed when no file matched -iTCP at all.
+                return CmdResult(status: lsof.isEmpty ? 1 : 0, output: lsof)
             case "/sbin/ping": pings.append(args.last ?? ""); return CmdResult(status: 0, output: "")
             case "/usr/bin/sudo":
                 expect(Array(args.prefix(2)), ["-n", OnDemandController.helperPath], "controller: sudo -n helper")
@@ -260,5 +264,19 @@ func runOnDemandTests() {
         expect(c.state, .connected, "lsof failure: stays connected, does not idle out")
         expect(sys.verbs, ["arm", "connect"], "lsof failure: no disconnect verb called")
         expect(ev.disconnected, 0, "lsof failure: DNS untouched")
+    }
+    do {   // lsof exit 1 with no output means "nothing matched", not failure — idles out normally
+        let sys = FakeSystem(); let (c, _) = sys.controller()
+        c.arm(); sys.lsof = syn; c.tick()
+        expect(c.state, .connected, "lsof empty: connected first")
+        sys.lsof = ""; sys.advance(30); c.tick()   // FakeSystem returns status 1 for empty output
+        expect(c.state, .armed, "lsof empty: exit 1 without output is no traffic → disconnects")
+        expect(sys.verbs, ["arm", "connect", "disconnect"], "lsof empty: disconnect verb called")
+    }
+    do {   // listeners only (what lsof prints without -s on a quiet machine) is no traffic
+        let sys = FakeSystem(); let (c, _) = sys.controller()
+        c.arm(); sys.lsof = syn; c.tick()
+        sys.lsof = "p9\nf3\nn*:5000\nTST=LISTEN\n"; sys.advance(30); c.tick()
+        expect(c.state, .armed, "lsof listen-only: LISTEN records are not VPN traffic → disconnects")
     }
 }
