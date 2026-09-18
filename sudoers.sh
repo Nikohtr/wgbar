@@ -9,8 +9,9 @@
 # Remove with:
 #   sudo rm /etc/sudoers.d/wgbar /usr/local/libexec/wgbar-helper
 #
-# Security: the rule lets the user run the helper with any arguments, and its print-armed verb prints a
-# config (private key included), so this script refuses config files the user cannot already read.
+# Security: the rule names the helper's privileged verbs one by one, leaving out print-armed —
+# that verb prints the config with its private key, and the point of a root-owned config is that
+# the key stays out of reach. Everything WGBar itself reads comes from print-public instead.
 #
 # Usage: ./sudoers.sh [config-folder]
 #   The folder defaults to the one WGBar uses (its "Config Folder…" setting, else the first
@@ -42,14 +43,15 @@ HELPER=/usr/local/libexec/wgbar-helper
 FOUND=0
 for f in "$CONF_DIR"/*.conf; do
   [[ -e "$f" ]] || continue
-  [[ -r "$f" ]] || { echo "$f is not readable by $(id -un); the helper's print-armed must not reveal configs you cannot read. Use a folder you own." >&2; exit 1; }
   FOUND=1
 done
 [[ $FOUND -eq 1 ]] || { echo "No .conf files in $CONF_DIR; nothing to allow." >&2; exit 1; }
 
 # One entry for the whole folder, so a config added later needs no re-run.
 GLOB="${CONF_DIR// /\\ }/*.conf"
-CMDS=("$HELPER" "$WG_QUICK up $GLOB" "$WG_QUICK down $GLOB")
+CMDS=("$WG_QUICK up $GLOB" "$WG_QUICK down $GLOB")
+# The helper verb by verb, so print-armed (which would print a private key) is not among them.
+for verb in arm connect disconnect down status print-public; do CMDS+=("$HELPER $verb *"); done
 
 RULE="$(id -un) ALL=(root) NOPASSWD: $(printf '%s, ' "${CMDS[@]}" | sed 's/, $//')"
 

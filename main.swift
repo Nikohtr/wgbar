@@ -58,6 +58,17 @@ func run(_ exe: String, _ args: [String]) -> CmdResult {
                      output: String(decoding: data, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines))
 }
 
+/// Tunnel configs, read from the file when this user may open it and through the root helper
+/// (`print-public`, no key material) when they may not — that is how the configs can stay
+/// root-owned. One reader for the whole app, so its cache is shared.
+let configs = ConfigReader(
+    read: { try? String(contentsOfFile: confPath($0), encoding: .utf8) },
+    viaHelper: { tunnel in
+        let r = run("/usr/bin/sudo", ["-n", OnDemandController.helperPath, "print-public", tunnel])
+        return r.status == 0 ? r.output : nil
+    },
+    modified: { (try? FileManager.default.attributesOfItem(atPath: confPath($0)))?[.modificationDate] as? Date })
+
 /// Bring the tunnel up or down. Returns an error message (nil on success or cancel) and whether
 /// the password dialog had to be used because no sudoers rule covers this config.
 func wgQuick(_ action: String, _ tunnel: String) -> (error: String?, askedForPassword: Bool) {
@@ -81,7 +92,7 @@ func wgQuick(_ action: String, _ tunnel: String) -> (error: String?, askedForPas
 func allConfigDNS() -> Set<String> {
     var all = Set<String>()
     for name in availableTunnels() {
-        if let text = try? String(contentsOfFile: confPath(name), encoding: .utf8) { all.formUnion(configDNSServers(text)) }
+        if let text = configs.text(name) { all.formUnion(configDNSServers(text)) }
     }
     return all
 }
@@ -105,7 +116,7 @@ func networkPrefsModified() -> Date {
 }
 
 func tunnelAddress(_ tunnel: String) -> String? {
-    guard let text = try? String(contentsOfFile: confPath(tunnel), encoding: .utf8) else { return nil }
+    guard let text = configs.text(tunnel) else { return nil }
     for line in text.split(separator: "\n") {
         let parts = line.split(separator: "=", maxSplits: 1).map { $0.trimmingCharacters(in: .whitespaces) }
         if parts.count == 2, parts[0].lowercased() == "address" { return parts[1] }
@@ -326,7 +337,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         repairItem.isEnabled = !busy && !dnsChecking
         updateItem.isEnabled = !busy
         rebuildTunnelSubmenu()
-        let confText = tunnel.isEmpty ? "" : (try? String(contentsOfFile: confPath(tunnel), encoding: .utf8)) ?? ""
+        let confText = tunnel.isEmpty ? "" : configs.text(tunnel) ?? ""
         let full = isFullTunnel(parseAllowedIPs(confText))
         onDemandItem.state = odTunnel != nil ? .on : .off
         onDemandItem.isEnabled = !busy && !tunnel.isEmpty && (odTunnel != nil || !full)
@@ -413,7 +424,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private func makeController(_ tunnel: String, _ cidrs: [CIDR]) -> OnDemandController {
         let idle = (defaults.object(forKey: "onDemandIdle") as? NSNumber)?.doubleValue ?? 30
-        let text = (try? String(contentsOfFile: confPath(tunnel), encoding: .utf8)) ?? ""
+        let text = configs.text(tunnel) ?? ""
         let od = OnDemandController(tunnel: tunnel, allowed: cidrs, idle: idle,
                                     kick: configDNSServers(text).first, run: run, now: Date.init)
         od.onConnected = { [weak self] in self?.applyVPNDNS(for: tunnel) }
@@ -425,7 +436,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     /// Runs on odQueue. Remember the current DNS, then set the config's servers everywhere (as wg-quick would).
     private func applyVPNDNS(for tunnel: String) {
-        guard let text = try? String(contentsOfFile: confPath(tunnel), encoding: .utf8) else { return }
+        guard let text = configs.text(tunnel) else { return }
         let servers = configDNSServers(text)
         guard !servers.isEmpty else { return }
         let guardian = DNSGuard(vpnDNS: allConfigDNS(), run: run)
@@ -466,7 +477,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             showError("", OnDemandController.needsHelperMessage)
             return
         }
-        guard let text = try? String(contentsOfFile: confPath(tunnel), encoding: .utf8) else {
+        guard let text = configs.text(tunnel) else {
             defaults.set(false, forKey: "onDemand")
             showError("", "Could not read \(confPath(tunnel)).")
             return

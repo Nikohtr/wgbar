@@ -161,6 +161,7 @@ func expect<T: Equatable>(_ actual: T, _ expected: T, _ name: String, file: Stri
                "update: no repo recorded")
 
         runOnDemandTests()
+        runConfigTextTests()
 
         print("\(passes) passed, \(failures) failed")
         exit(failures == 0 ? 0 : 1)
