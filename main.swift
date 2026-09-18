@@ -58,21 +58,22 @@ func run(_ exe: String, _ args: [String]) -> CmdResult {
                      output: String(decoding: data, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines))
 }
 
-/// Bring the tunnel up or down. Returns an error message, or nil on success/cancel.
-func wgQuick(_ action: String, _ tunnel: String) -> String? {
+/// Bring the tunnel up or down. Returns an error message (nil on success or cancel) and whether
+/// the password dialog had to be used because no sudoers rule covers this config.
+func wgQuick(_ action: String, _ tunnel: String) -> (error: String?, askedForPassword: Bool) {
     // 1. Passwordless sudo, if a sudoers rule allows it (see sudoers.sh).
     let conf = confPath(tunnel)
     let r = run("/usr/bin/sudo", ["-n", wgQuick, action, conf])
-    if r.status == 0 { return nil }
-    if !r.output.contains("password") { return r.output }   // a real wg-quick failure
+    if r.status == 0 { return (nil, false) }
+    if !r.output.contains("password") { return (r.output, false) }   // a real wg-quick failure
 
     // 2. Otherwise the standard macOS administrator dialog (supports Touch ID).
     let shell = "PATH=\(brewBin):$PATH '\(wgQuick)' \(action) '\(conf)'"
     let script = "do shell script \"\(shell)\" with administrator privileges"
     let r2 = run("/usr/bin/osascript", ["-e", script])
-    if r2.status == 0 { return nil }
-    if r2.output.contains("-128") { return nil }             // user pressed Cancel
-    return r2.output
+    if r2.status == 0 { return (nil, true) }
+    if r2.output.contains("-128") { return (nil, true) }             // user pressed Cancel
+    return (r2.output, true)
 }
 
 /// Every DNS server declared by any config in the folder (a stale entry may come from a
@@ -139,6 +140,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var dnsIssue: [String] = []
     private var dnsChecking = false
     private var prefsSeen = networkPrefsModified()
+    /// Tunnels already told that ./sudoers.sh would spare them the password dialog.
+    private var sudoersHinted: Set<String> = []
 
     /// The tunnel to control: the remembered choice if its config still exists, else the first one found.
     private func resolveTunnel() {
@@ -278,6 +281,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc private func repairDNS() { checkDNS(interactive: true) }
 
+    /// The password dialog means no sudoers rule covers this config; say so once per tunnel
+    /// per run, instead of letting the prompt come back unexplained at every toggle.
+    private func hintSudoers(_ tunnel: String) {
+        guard sudoersHinted.insert(tunnel).inserted else { return }
+        showError("", "WGBar asked for your password because no sudoers rule covers "
+                    + "\(tunnel).conf.\nRun ./sudoers.sh in the WGBar folder to toggle without the prompt.",
+                  style: .informational)
+    }
+
     private func notify(_ body: String) {
         guard Bundle.main.bundleIdentifier != nil else { return }   // UNUserNotificationCenter needs a bundle
         let center = UNUserNotificationCenter.current()
@@ -376,11 +388,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             if action == "up", !vpnDNS.isEmpty, !anyTunnelUp() {
                 defaults.set(DNSGuard(vpnDNS: vpnDNS, run: run).snapshot(), forKey: "dnsSnapshot")
             }
-            let error = wgQuick(action, tunnel)
+            let result = wgQuick(action, tunnel)
             DispatchQueue.main.async {
                 self.busy = false
                 self.refresh()
-                if let error { self.showError(action, error) }
+                if let error = result.error { self.showError(action, error) }
+                if result.askedForPassword { self.hintSudoers(tunnel) }
                 // Give wg-quick's own monitor a moment to restore DNS; fix whatever it did not.
                 if action == "down" { DispatchQueue.main.asyncAfter(deadline: .now() + 3) { self.checkDNS() } }
             }
@@ -475,7 +488,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         odQueue.async {
             // A classic `wg-quick up` interface carries VPN DNS and a monitor that re-applies it: replace it.
             if !atLaunch, FileManager.default.fileExists(atPath: runFile(tunnel)) {
-                if let error = wgQuick("down", tunnel) {
+                let result = wgQuick("down", tunnel)
+                if result.askedForPassword {
+                    DispatchQueue.main.async { self.hintSudoers(tunnel) }
+                }
+                if let error = result.error {
                     DispatchQueue.main.async { self.busy = false; self.refresh(); self.showError("down", error) }
                     return
                 }

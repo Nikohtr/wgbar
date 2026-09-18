@@ -1,8 +1,12 @@
 #!/bin/bash
 # Installs the WGBar helper and a sudoers rule so WGBar can run "wg-quick up/down <config>" and
 # "wgbar-helper <verb> <tunnel>" (Connect on Demand) without a password prompt.
-# The rule is limited to the current user and to the tunnel configs that exist right now;
-# re-run this script after adding a config or updating WGBar. Remove with:
+# The rule is limited to the current user and to "<config-folder>/*.conf": sudo matches
+# arguments with fnmatch, where "*" does not cross a "/", so nothing outside that folder is
+# allowed and a config added later works without re-running this script. Re-run it after
+# changing the config folder or updating WGBar. Note that whoever can write a config in that
+# folder can run commands as root through wg-quick's PostUp, so keep the folder to yourself.
+# Remove with:
 #   sudo rm /etc/sudoers.d/wgbar /usr/local/libexec/wgbar-helper
 #
 # Security: the rule lets the user run the helper with any arguments, and its print-armed verb prints a
@@ -35,13 +39,17 @@ CONF_DIR="${CONF_DIR%/}"
 [[ -n "$CONF_DIR" && -d "$CONF_DIR" ]] || { echo "No config folder found; pass one:  ./sudoers.sh /path/to/wireguard" >&2; exit 1; }
 
 HELPER=/usr/local/libexec/wgbar-helper
-CMDS=("$HELPER")
+FOUND=0
 for f in "$CONF_DIR"/*.conf; do
   [[ -e "$f" ]] || continue
   [[ -r "$f" ]] || { echo "$f is not readable by $(id -un); the helper's print-armed must not reveal configs you cannot read. Use a folder you own." >&2; exit 1; }
-  CMDS+=("$WG_QUICK up ${f// /\\ }" "$WG_QUICK down ${f// /\\ }")
+  FOUND=1
 done
-[[ ${#CMDS[@]} -gt 1 ]] || { echo "No .conf files in $CONF_DIR; nothing to allow." >&2; exit 1; }
+[[ $FOUND -eq 1 ]] || { echo "No .conf files in $CONF_DIR; nothing to allow." >&2; exit 1; }
+
+# One entry for the whole folder, so a config added later needs no re-run.
+GLOB="${CONF_DIR// /\\ }/*.conf"
+CMDS=("$HELPER" "$WG_QUICK up $GLOB" "$WG_QUICK down $GLOB")
 
 RULE="$(id -un) ALL=(root) NOPASSWD: $(printf '%s, ' "${CMDS[@]}" | sed 's/, $//')"
 

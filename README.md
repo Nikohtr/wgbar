@@ -48,11 +48,16 @@ The app is built on your machine and ad-hoc signed, so there is no Gatekeeper pr
 ```
 
 This installs the WGBar helper and writes `/etc/sudoers.d/wgbar` allowing **only your user**
-to run the helper and `wg-quick up/down <path-to-config>` for the tunnel configs that exist
-right now, after validating it with `visudo -c`. It refuses config files your user cannot
-already read. Re-run it after adding a config or changing the config folder
-(`./sudoers.sh /some/other/folder` to point it elsewhere). Remove it with
+to run the helper and `wg-quick up/down <config-folder>/*.conf`, after validating it with
+`visudo -c`. sudo matches arguments with fnmatch, where `*` does not cross a `/`, so the rule
+covers the configs in that one folder and nothing deeper — a config added later works without
+re-running the script. It refuses to install while the folder holds a config your user cannot
+read. Re-run it after changing the config folder (`./sudoers.sh /some/other/folder` to point it
+elsewhere) or after updating WGBar. Remove it with
 `sudo rm /etc/sudoers.d/wgbar /usr/local/libexec/wgbar-helper`.
+
+Anyone who can write a config in that folder can run commands as root through `wg-quick`'s
+`PostUp`, with or without this rule — keep the folder to yourself.
 
 ## Choosing a tunnel
 
@@ -160,7 +165,8 @@ its settings, the helper and the sudoers rule (if installed).
   on `up` and removes on `down`; it is polled every 2 s, so changes made from Terminal
   show up too.
 - Toggling runs `sudo -n wg-quick up|down <folder>/<name>.conf`; if that fails for lack of
-  a sudoers rule it falls back to `osascript ... with administrator privileges`.
+  a sudoers rule it falls back to `osascript ... with administrator privileges` and then says
+  once per tunnel that `./sudoers.sh` would spare you the prompt.
 - Login item uses `SMAppService` (hence macOS 13+).
 - Connect on Demand polls `lsof -nP -iTCP` once a second
   (netstat returns an empty list to ad-hoc signed apps on macOS 27) and calls
