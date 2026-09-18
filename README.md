@@ -48,11 +48,28 @@ The app is built on your machine and ad-hoc signed, so there is no Gatekeeper pr
 ```
 
 This installs the WGBar helper and writes `/etc/sudoers.d/wgbar` allowing **only your user**
-to run the helper and `wg-quick up/down <path-to-config>` for the tunnel configs that exist
-right now, after validating it with `visudo -c`. It refuses config files your user cannot
-already read. Re-run it after adding a config or changing the config folder
-(`./sudoers.sh /some/other/folder` to point it elsewhere). Remove it with
+to run the helper and `wg-quick up/down <config-folder>/*.conf`, after validating it with
+`visudo -c`. sudo matches arguments with fnmatch, where `*` does not cross a `/`, so the rule
+covers the configs in that one folder and nothing deeper — a config added later works without
+re-running the script. The helper is allowed verb by verb, leaving out `print-armed`, which
+prints a config with its private key. Re-run the script after changing the config folder
+(`./sudoers.sh /some/other/folder` to point it elsewhere) or after updating WGBar. Remove it with
 `sudo rm /etc/sudoers.d/wgbar /usr/local/libexec/wgbar-helper`.
+
+### Keep the configs out of your own reach
+
+A config holds a private key, and `wg-quick` runs its `PostUp` as root, so a config you can write
+is a way to become root without a password once the rule above exists. Own them by root:
+
+```sh
+sudo chown root:wheel /path/to/wireguard/*.conf
+sudo chmod 600 /path/to/wireguard/*.conf
+```
+
+WGBar then reads what it needs (`DNS`, `AllowedIPs`, `Address`, the menu text) through
+`sudo -n wgbar-helper print-public <tunnel>`, which prints the config without `PrivateKey` and
+`PresharedKey`. Configs you own keep working — the file is tried first — but the key is then
+readable by anything running as you.
 
 ## Choosing a tunnel
 
@@ -160,7 +177,11 @@ its settings, the helper and the sudoers rule (if installed).
   on `up` and removes on `down`; it is polled every 2 s, so changes made from Terminal
   show up too.
 - Toggling runs `sudo -n wg-quick up|down <folder>/<name>.conf`; if that fails for lack of
-  a sudoers rule it falls back to `osascript ... with administrator privileges`.
+  a sudoers rule it falls back to `osascript ... with administrator privileges` and then says
+  once per tunnel that `./sudoers.sh` would spare you the prompt.
+- Config text comes from the file when WGBar may open it and from
+  `sudo -n /usr/local/libexec/wgbar-helper print-public <tunnel>` when it may not (root-owned
+  configs), cached until the file's modification date changes.
 - Login item uses `SMAppService` (hence macOS 13+).
 - Connect on Demand polls `lsof -nP -iTCP` once a second
   (netstat returns an empty list to ad-hoc signed apps on macOS 27) and calls
