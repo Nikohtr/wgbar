@@ -5,6 +5,8 @@
 ![No dependencies](https://img.shields.io/badge/dependencies-none-success)
 ![License: MIT](https://img.shields.io/badge/license-MIT-blue)
 
+![WGBar in the menu bar](docs/menubar.png)
+
 A tiny macOS menu bar toggle for WireGuard tunnels managed by `wg-quick`
 (the Homebrew `wireguard-tools` package).
 
@@ -13,6 +15,8 @@ A tiny macOS menu bar toggle for WireGuard tunnels managed by `wg-quick`
   pick a tunnel (when you have more than one), connect on demand, launch at login, check for
   updates, quit.
 - Icon: `shield.fill` = connected, `shield` = armed (on demand), `shield.slash` = disconnected.
+
+![Right-click menu](docs/menu.png)
 
 It is about 1,100 lines of Swift with no dependencies beyond Cocoa (`./test.sh` runs the unit tests). It exists because the
 App Store WireGuard app uses its own tunnel stack (not your `wg-quick` configs), and
