@@ -1,5 +1,10 @@
 # WGBar
 
+![macOS 13+](https://img.shields.io/badge/macOS-13%2B-black?logo=apple)
+![Swift](https://img.shields.io/badge/Swift-5-F05138?logo=swift&logoColor=white)
+![No dependencies](https://img.shields.io/badge/dependencies-none-success)
+![License: MIT](https://img.shields.io/badge/license-MIT-blue)
+
 A tiny macOS menu bar toggle for WireGuard tunnels managed by `wg-quick`
 (the Homebrew `wireguard-tools` package).
 
@@ -9,9 +14,21 @@ A tiny macOS menu bar toggle for WireGuard tunnels managed by `wg-quick`
   updates, quit.
 - Icon: `shield.fill` = connected, `shield` = armed (on demand), `shield.slash` = disconnected.
 
-It is a few hundred lines of Swift with no dependencies beyond Cocoa (`./test.sh` runs the unit tests). It exists because the
+It is about 1,100 lines of Swift with no dependencies beyond Cocoa (`./test.sh` runs the unit tests). It exists because the
 App Store WireGuard app uses its own tunnel stack (not your `wg-quick` configs), and
 the other menu bar options are unmaintained.
+
+Beyond the toggle, it solves three things the stock tooling gets wrong on macOS:
+
+- **[Connect on demand](#connect-on-demand)** — the tunnel comes up when something opens a
+  connection into it and goes down when idle, *without the first connection failing*. Done by
+  keeping the WireGuard interface "armed" (up, routed, no endpoint) so sockets bind the tunnel
+  address before the handshake exists.
+- **[DNS repair](#dns-left-behind-and-the-fix)** — `wg-quick` leaves VPN DNS servers set system-wide
+  when its monitor dies; WGBar detects and reverts that at launch, on wake and on network changes.
+- **[Least-privilege root](#optional-toggle-without-a-password-prompt)** — a 100-line helper plus a
+  `sudoers.d` rule scoped to your user and the config files that exist, validated with `visudo -c`.
+  Falls back to the standard admin dialog if not installed.
 
 ## Requirements
 
@@ -174,3 +191,12 @@ its settings, the helper and the sudoers rule (if installed).
 The app is `main.swift`; `DNSGuard.swift`, `Updater.swift` and `OnDemand.swift` hold the
 testable parts; `helper/wgbar-helper` is the root helper. `./build.sh` builds
 `build/WGBar.app` without installing; `./install.sh` builds, installs and relaunches.
+
+`./test.sh` compiles and runs the unit tests (plain Swift, no XCTest, so no Xcode project
+needed) and the helper's shell tests against the fixtures in `tests/fixtures`. The design
+notes for on-demand connect — why an armed interface, the state machine, what the helper may
+and may not do — are in [`docs/superpowers/specs/2026-09-02-on-demand-design.md`](docs/superpowers/specs/2026-09-02-on-demand-design.md).
+
+## License
+
+MIT — see [LICENSE](LICENSE).
