@@ -4,13 +4,15 @@
 # paths below and allows the current user to run this file (and nothing else) via sudo.
 # Design: docs/superpowers/specs/2026-09-02-on-demand-design.md
 #
-# Usage: wgbar-helper arm|connect|disconnect|down|status|print-armed <tunnel>
+# Usage: wgbar-helper arm|connect|disconnect|down|status|print-armed|print-public <tunnel>
 #   arm          bring the interface up from the "armed" config (no DNS, no Endpoint)
 #   connect      give the peer its Endpoint (and PersistentKeepalive) → traffic flows
 #   disconnect   take the Endpoint away again; routes stay, packets are held
 #   down         wg-quick down (never touches DNS, since the armed config has none)
 #   status       print off | armed | connected
 #   print-armed  print the derived armed config (works without root; for tests)
+#   print-public print the config without PrivateKey/PresharedKey — what WGBar needs to read
+#                (DNS, AllowedIPs, Address) when the configs are root-owned
 set -euo pipefail
 
 CONF_DIR=/opt/homebrew/etc/wireguard
@@ -23,11 +25,11 @@ export PATH="${WG_QUICK%/*}:/usr/bin:/bin:/usr/sbin:/sbin"
 [[ $EUID -ne 0 && -n "${WGBAR_CONF_DIR:-}" ]] && CONF_DIR="$WGBAR_CONF_DIR"
 ARMED_DIR=""
 
-usage() { echo "usage: wgbar-helper arm|connect|disconnect|down|status|print-armed <tunnel>" >&2; exit 2; }
+usage() { echo "usage: wgbar-helper arm|connect|disconnect|down|status|print-armed|print-public <tunnel>" >&2; exit 2; }
 die() { echo "$*" >&2; exit 1; }
 
 verb="${1:-}"; tunnel="${2:-}"
-case "$verb" in arm|connect|disconnect|down|status|print-armed) ;; *) usage ;; esac
+case "$verb" in arm|connect|disconnect|down|status|print-armed|print-public) ;; *) usage ;; esac
 [[ -n "$tunnel" ]] || usage
 # Same character set wg-quick accepts for interface names; in particular no "/" or "..".
 [[ "$tunnel" =~ ^[a-zA-Z0-9_=+.-]{1,15}$ && "$tunnel" != *..* ]] || usage
@@ -45,6 +47,19 @@ armed_config() {
     if [[ "$line" == *=* ]]; then
       key="$(lower "$(trim "${line%%=*}")")"
       case "$key" in dns|endpoint|persistentkeepalive) continue ;; esac
+    fi
+    printf '%s\n' "$line"
+  done < "$conf"
+}
+
+# The config without its key material: everything WGBar reads (DNS, AllowedIPs, Address, the
+# menu text) and nothing secret, so the configs themselves can stay root-owned.
+public_config() {
+  local line key
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    if [[ "$line" == *=* ]]; then
+      key="$(lower "$(trim "${line%%=*}")")"
+      case "$key" in privatekey|presharedkey) continue ;; esac
     fi
     printf '%s\n' "$line"
   done < "$conf"
@@ -78,6 +93,8 @@ make_armed() {
 case "$verb" in
   print-armed)
     armed_config ;;
+  print-public)
+    public_config ;;
   status)
     if [[ ! -f "$namefile" ]]; then echo off; exit 0; fi
     need_root

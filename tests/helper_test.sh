@@ -10,6 +10,14 @@ check() { if [[ "$2" == "$3" ]]; then echo "ok   $1"; else echo "FAIL $1"; echo 
 check "print-armed drops DNS, Endpoint and PersistentKeepalive" \
   "$($H print-armed sample 2>&1)" "$(cat tests/fixtures/sample.armed.conf)"
 
+check "print-public keeps what WGBar reads and drops the key material" \
+  "$($H print-public sample 2>&1)" "$(cat tests/fixtures/sample.public.conf)"
+
+check "print-public leaves no key line at all" \
+  "$($H print-public sample 2>/dev/null | grep -ci 'privatekey\|presharedkey')" "0"
+
+$H print-public "../sample" >/dev/null 2>&1; check "print-public rejects path traversal" "$?" "2"
+
 $H print-armed missing >/dev/null 2>&1; check "unknown tunnel exits 1" "$?" "1"
 $H print-armed "../sample" >/dev/null 2>&1; check "path traversal is rejected" "$?" "2"
 $H print-armed "a/b" >/dev/null 2>&1; check "slash in name is rejected" "$?" "2"

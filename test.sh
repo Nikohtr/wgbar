@@ -3,6 +3,7 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 mkdir -p build/tests
-swiftc -o build/tests/DNSGuardTests DNSGuard.swift Updater.swift OnDemand.swift tests/DNSGuardTests.swift tests/OnDemandTests.swift
+swiftc -o build/tests/DNSGuardTests DNSGuard.swift Updater.swift OnDemand.swift ConfigText.swift \
+  tests/DNSGuardTests.swift tests/OnDemandTests.swift tests/ConfigTextTests.swift
 build/tests/DNSGuardTests
 tests/helper_test.sh
