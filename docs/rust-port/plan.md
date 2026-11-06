@@ -127,3 +127,42 @@ pub fn wg_quick(run: &Runner, wg_quick: &str, brew_bin: &str, action: &str, conf
 - No new runtime dependencies beyond Cargo.toml without a reason in the commit message.
 - `cargo test`, `cargo clippy --all-targets -- -D warnings` (host) and
   `cargo clippy --target aarch64-apple-darwin --bins -- -D warnings` must pass.
+
+## Status
+
+- **Phase 1 — done (2026-11-06, Linux).** Core + 70 tests, helper + 13 shell checks, AppKit layer
+  type-checked for aarch64/x86_64 macOS, clippy clean on both, Swift/bash sources removed,
+  scripts and README updated. Two independent reviews: no crash, deadlock or security regression
+  found; their small fixes are in. Linux numbers (not comparable to a Mac, for reference only):
+  `logic_bench` parse_lsof_400 ≈ 24 µs, vpn_bound_400 ≈ 27 µs, poll_tick_400 ≈ 51 µs,
+  parse_config ≈ 0.8 µs.
+- **Phase 2 — waiting for a Mac.**
+
+## Phase 2 loop (run on the Mac: `/loop` with "continue the WGBar Rust port, phase 2 of docs/rust-port/plan.md")
+
+Each iteration: pick the first unchecked item, do it, tick it here, commit. Stop when all are ticked.
+
+- [ ] `./test.sh` passes on macOS (core tests use real `inet_pton`, temp dirs).
+- [ ] Baseline: Connect on Demand off, then `bench/compare.sh` → `bench/results/*.md` committed.
+- [ ] `cargo build` (debug) app runs from `target/debug/WGBar` without objc2 encoding panics.
+- [ ] Left-click toggles; right-click opens the menu; next left-click toggles again.
+- [ ] Busy states grey out items now (autoenabling off) — check nothing stays wrongly disabled.
+- [ ] Tunnel submenu (≥2 configs), Config Folder… panel comes to front, choice persists.
+- [ ] Launch at Login: first-launch registration, checkbox state, toggle; error text readable.
+- [ ] DNS guard: leave VPN DNS behind (`networksetup -setdnsservers Wi-Fi <vpn dns>`), relaunch →
+      repaired + notification; Repair DNS alert both ways; wake re-check after 3 s.
+- [ ] `dnsSnapshot` written by the Swift app is read back and restored correctly.
+- [ ] `./sudoers.sh` builds + installs the Rust helper; `install.sh` staleness note goes away.
+- [ ] Connect on Demand: arm, connect on RDP/TCP traffic, idle-out, sticky manual connect,
+      tunnel switch, quit while armed/connected (interface down, DNS restored).
+- [ ] Check for Updates: up to date / available / install.sh relaunch survives `pkill -x WGBar`.
+- [ ] Child-process fd hygiene: no stray pipe fds inherited by osascript (review finding,
+      unverified) — `lsof -p <osascript pid>` during an admin prompt.
+- [ ] Bench Rust ≤ Swift on launch, RSS and idle CPU; if not, profile (Instruments) and fix.
+
+## Follow-ups (not parity; decide later)
+
+- Helper: open the config with O_NOFOLLOW + fstat and cap the read (pre-existing symlink read).
+- Helper: remove the temp dir on SIGTERM/SIGHUP/SIGINT.
+- Configs with CRLF line endings: trim `\r` (Swift and Rust both mis-parse them, differently).
+- `vpn_bound` re-parses every remote IP for every CIDR; parse once per socket if the bench says so.
