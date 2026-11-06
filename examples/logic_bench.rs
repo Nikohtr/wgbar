@@ -35,10 +35,14 @@ fn main() {
 
     let parse = median_ns(2_000, || parse_lsof(black_box(&lsof)).len());
     let bound = median_ns(2_000, || vpn_bound(black_box(&sockets), &allowed).len());
-    let tick = median_ns(2_000, || vpn_bound(&parse_lsof(black_box(&lsof)), &allowed).len());
+    let tick = median_ns(2_000, || {
+        vpn_bound(&parse_lsof(black_box(&lsof)), &allowed).len()
+    });
     let config = median_ns(200_000, || {
         let c = black_box(&conf);
-        config_dns_servers(c).len() + parse_allowed_ips(c).len() + tunnel_address(c).map_or(0, |a| a.len())
+        config_dns_servers(c).len()
+            + parse_allowed_ips(c).len()
+            + tunnel_address(c).map_or(0, |a| a.len())
     });
     println!("parse_lsof_400 {parse:.0}");
     println!("vpn_bound_400 {bound:.0}");

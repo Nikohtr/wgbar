@@ -13,6 +13,7 @@
 #   of /opt/homebrew|/usr/local|/opt/local/etc/wireguard or /etc/wireguard that has configs).
 set -euo pipefail
 cd "$(dirname "$0")"
+export PATH="$HOME/.cargo/bin:$PATH"
 
 WG_QUICK="$(defaults read org.wgbar.WGBar wgQuick 2>/dev/null || true)"
 if [[ ! -x "$WG_QUICK" ]]; then
@@ -53,7 +54,7 @@ trap 'rm -f "$TMP"' EXIT
 } > "$TMP"
 # Build the helper with the three paths baked in at compile time (see build.rs).
 WGBAR_BUILD_CONF_DIR="$CONF_DIR" WGBAR_BUILD_WG_QUICK="$WG_QUICK" WGBAR_BUILD_WG="$WG" \
-  cargo build --release --bin wgbar-helper
+  cargo build --release --bin wgbar-helper --target-dir "$PWD/target"   # fixed path for BUILT below
 BUILT=target/release/wgbar-helper
 
 echo "About to install this rule to /etc/sudoers.d/wgbar:"

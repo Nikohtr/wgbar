@@ -15,7 +15,9 @@ fn main() {
     /// kCGStatusWindowLevel: the layer NSStatusItem windows live on.
     const STATUS_LAYER: i64 = 25;
 
-    let exe = std::env::args().nth(1).expect("usage: launch_probe <executable>");
+    let exe = std::env::args()
+        .nth(1)
+        .expect("usage: launch_probe <executable>");
     let start = Instant::now();
     // Deliberately not waited on: the app must outlive the probe (measure.sh samples it next).
     #[allow(clippy::zombie_processes)]

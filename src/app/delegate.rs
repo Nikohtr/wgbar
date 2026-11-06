@@ -229,7 +229,9 @@ fn global_queue(qos: DispatchQoS) -> DispatchRetained<DispatchQueue> {
 /// The `onDemandIdle` default as a `Duration`. Negative or NaN means "disconnect as soon as
 /// idle", too large for a `Duration` means "never".
 fn idle_duration(seconds: f64) -> Duration {
-    if seconds.is_nan() || seconds <= 0.0 {
+    if seconds.is_nan() {
+        Duration::MAX // Swift: `quietFor >= .nan` is never true, so it never idles out
+    } else if seconds <= 0.0 {
         Duration::ZERO
     } else {
         Duration::try_from_secs_f64(seconds).unwrap_or(Duration::MAX)
@@ -328,7 +330,12 @@ impl AppDelegate {
             // SAFETY: each item's action is a method of `self`, which lives for the process.
             unsafe { item.setTarget(Some(self.as_target())) };
         }
-        iv.tunnel_item.setSubmenu(Some(&NSMenu::new(mtm)));
+        // Explicit enabled states (busy, DNS check running, full tunnel) only take effect with
+        // autoenabling off; the Swift app left it on, so its setEnabled calls were ignored.
+        iv.menu.setAutoenablesItems(false);
+        let submenu = NSMenu::new(mtm);
+        submenu.setAutoenablesItems(false);
+        iv.tunnel_item.setSubmenu(Some(&submenu));
         iv.menu.addItem(&iv.status_line);
         iv.menu.addItem(&iv.dns_line);
         iv.menu.addItem(&iv.toggle_item);
@@ -862,6 +869,10 @@ impl AppDelegate {
 
     /// Pick the folder holding <name>.conf files (for setups outside the default locations).
     fn choose_folder(&self) {
+        // A folder change while an on-demand start/stop is in flight would arm the old tunnel.
+        if self.ivars().busy.get() {
+            return;
+        }
         let mtm = self.mtm();
         let panel = NSOpenPanel::openPanel(mtm);
         panel.setCanChooseDirectories(true);

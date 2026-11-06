@@ -207,7 +207,10 @@ impl Ctx {
     }
 
     fn read_conf(&self) -> Result<Vec<u8>, Fail> {
-        fs::read(&self.conf).map_err(|e| die(format!("{}: {e}", self.conf.display())))
+        let mut data =
+            fs::read(&self.conf).map_err(|e| die(format!("{}: {e}", self.conf.display())))?;
+        data.retain(|&b| b != 0); // bash `read` silently drops NUL bytes; so must we
+        Ok(data)
     }
 
     fn iface(&self) -> Result<String, Fail> {
@@ -245,6 +248,7 @@ fn read_iface(namefile: &Path) -> Result<String, Fail> {
     File::open(namefile)
         .and_then(|mut f| f.read_to_end(&mut data))
         .map_err(|e| die(format!("{}: {e}", namefile.display())))?;
+    data.retain(|&b| b != 0); // bash `$(cat ...)` drops NUL bytes
     while data.last() == Some(&b'\n') {
         data.pop();
     }
