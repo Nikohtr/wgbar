@@ -8,6 +8,10 @@ if ! xcode-select -p >/dev/null 2>&1; then
   echo "Xcode Command Line Tools are required. Install them with:  xcode-select --install" >&2
   exit 1
 fi
+if ! command -v cargo >/dev/null && [[ ! -x "$HOME/.cargo/bin/cargo" ]]; then
+  echo "Rust is required. Install it with:  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh" >&2
+  exit 1
+fi
 WG_QUICK=""
 for p in /opt/homebrew/bin /usr/local/bin /opt/local/bin; do
   [[ -x "$p/wg-quick" ]] && WG_QUICK="$p/wg-quick" && break
@@ -35,7 +39,8 @@ open ~/Applications/WGBar.app
 echo "Installed and launched ~/Applications/WGBar.app"
 
 HELPER=/usr/local/libexec/wgbar-helper
-if [[ -e "$HELPER" ]] && ! diff -q <(grep -vE '^(CONF_DIR|WG_QUICK|WG)=' "$HELPER") <(grep -vE '^(CONF_DIR|WG_QUICK|WG)=' helper/wgbar-helper) >/dev/null; then
+NEW_HELPER=target/release/wgbar-helper   # built by build.sh; an old bash helper has no source-hash verb
+if [[ -e "$HELPER" && -x "$NEW_HELPER" ]] && [[ "$("$HELPER" source-hash 2>/dev/null || true)" != "$("$NEW_HELPER" source-hash)" ]]; then
   echo "Note: the installed WGBar helper is out of date. Run ./sudoers.sh to update it."
 fi
 echo "Optional: run ./sudoers.sh to skip the password prompt when toggling (required for Connect on Demand)."
