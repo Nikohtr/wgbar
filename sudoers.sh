@@ -45,26 +45,24 @@ done
 
 RULE="$(id -un) ALL=(root) NOPASSWD: $(printf '%s, ' "${CMDS[@]}" | sed 's/, $//')"
 
-TMP="$(mktemp)"; TMP_HELPER="$(mktemp)"
-trap 'rm -f "$TMP" "$TMP_HELPER"' EXIT
+TMP="$(mktemp)"
+trap 'rm -f "$TMP"' EXIT
 {
   echo "# Installed by WGBar (sudoers.sh). Lets $(id -un) toggle WireGuard tunnels in $CONF_DIR without a password."
   echo "$RULE"
 } > "$TMP"
-CD="$(printf '%q' "$CONF_DIR")" WQ="$(printf '%q' "$WG_QUICK")" WGB="$(printf '%q' "$WG")" \
-awk '/^CONF_DIR=/ { print "CONF_DIR=" ENVIRON["CD"]; next }
-     /^WG_QUICK=/ { print "WG_QUICK=" ENVIRON["WQ"]; next }
-     /^WG=/       { print "WG=" ENVIRON["WGB"]; next }
-     { print }' helper/wgbar-helper > "$TMP_HELPER"
-bash -n "$TMP_HELPER"
+# Build the helper with the three paths baked in at compile time (see build.rs).
+WGBAR_BUILD_CONF_DIR="$CONF_DIR" WGBAR_BUILD_WG_QUICK="$WG_QUICK" WGBAR_BUILD_WG="$WG" \
+  cargo build --release --bin wgbar-helper
+BUILT=target/release/wgbar-helper
 
 echo "About to install this rule to /etc/sudoers.d/wgbar:"
 echo "----"
 cat "$TMP"
 echo "----"
-echo "and the helper script to $HELPER (config folder $CONF_DIR)."
+echo "and the helper binary to $HELPER (config folder $CONF_DIR)."
 sudo visudo -c -q -f "$TMP"
 sudo install -d -m 755 -o root -g wheel /usr/local/libexec
-sudo install -m 755 -o root -g wheel "$TMP_HELPER" "$HELPER"
+sudo install -m 755 -o root -g wheel "$BUILT" "$HELPER"
 sudo install -m 440 -o root -g wheel "$TMP" /etc/sudoers.d/wgbar
 echo "Done. WGBar will now toggle the tunnels in $CONF_DIR without prompting, and Connect on Demand is available."
