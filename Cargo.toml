@@ -37,7 +37,3 @@ codegen-units = 1
 panic = "abort"
 strip = true
 
-# Bench tooling only (examples/launch_probe.rs).
-[target.'cfg(target_os = "macos")'.dev-dependencies]
-objc2-core-graphics = "0.3"
-objc2-core-foundation = "0.3"

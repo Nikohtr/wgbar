@@ -145,7 +145,10 @@ Each iteration: pick the first unchecked item, do it, tick it here, commit. Stop
 - [x] `./test.sh` passes on macOS (core tests use real `inet_pton`, temp dirs).
       2026-11-07, macOS 27 arm64, rustc 1.99.1: 70 Rust tests + 12 helper checks pass;
       `cargo clippy --all-targets -- -D warnings` clean on the Mac host.
-- [ ] Baseline: Connect on Demand off, then `bench/compare.sh` → `bench/results/*.md` committed.
+- [x] Baseline: Connect on Demand off, then `bench/compare.sh` → `bench/results/*.md` committed.
+      2026-11-07 (`bench/results/2026-11-07-Nikos-MacBook-Pro.md`): launch median equal (61.4 ms),
+      RSS 50.9 vs 54.1 MB, idle CPU 140 vs 170 ms/min, logic 2–23× faster; binary 503 vs 273 KB.
+      `launch_probe` rewritten: the status-window check cannot work on macOS 27 (MenuBarAgent).
 - [ ] `cargo build` (debug) app runs from `target/debug/WGBar` without objc2 encoding panics.
 - [ ] Left-click toggles; right-click opens the menu; next left-click toggles again.
 - [ ] Busy states grey out items now (autoenabling off) — check nothing stays wrongly disabled.
