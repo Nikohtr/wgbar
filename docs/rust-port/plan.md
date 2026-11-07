@@ -168,10 +168,39 @@ Each iteration: pick the first unchecked item, do it, tick it here, commit. Stop
       match, `sudo -n wgbar-helper status` → armed.
 - [ ] Connect on Demand: arm, connect on RDP/TCP traffic, idle-out, sticky manual connect,
       tunnel switch, quit while armed/connected (interface down, DNS restored).
+      2026-11-07 (perf pass build): re-arm at launch, connect 0.3–1.2 s after a SYN to
+      10.42.1.1:3389, idle-out 30 s after the last socket, quit while connected → `off` — OK.
+      Still to check: sticky manual connect, tunnel switch, DNS restore on quit.
 - [ ] Check for Updates: up to date / available / install.sh relaunch survives `pkill -x WGBar`.
 - [ ] Child-process fd hygiene: no stray pipe fds inherited by osascript (review finding,
       unverified) — `lsof -p <osascript pid>` during an admin prompt.
-- [ ] Bench Rust ≤ Swift on launch, RSS and idle CPU; if not, profile (Instruments) and fix.
+- [x] Bench Rust ≤ Swift on launch, RSS and idle CPU; if not, profile (Instruments) and fix.
+      2026-11-07, see "Performance pass" below and `bench/results/*-optimized.md`.
+
+## Performance pass (2026-11-07, `/loop` "more efficient than the Swift code")
+
+| | Swift (`main`) | Rust before | Rust after |
+|---|---:|---:|---:|
+| idle CPU, On-Demand off (side by side) | 150–290 ms/min | 147 ms/min | ~2–3 ms/min |
+| idle wakeups, On-Demand off | 137–200 /min | 134 /min | 2–4 /min |
+| On-Demand armed, app CPU | (+ ~2 s/min in lsof children) | 258 ms/min (+ ~1.5 s/min lsof) | 48 ms/min, no children |
+| one socket poll (wall / CPU) | 100 ms / 34 ms | 26 ms / 25 ms | 0.6 ms / 0.6 ms, mostly skipped while armed |
+| clean build / test.sh | 3.6 s / 1.9 s | 18.5 s / 31 s | 7 s / 7 s |
+| launch, footprint | equal within noise | | equal / slightly lower |
+
+What changed: libproc socket scan instead of spawning lsof (`src/proc_sockets.rs`); while
+armed, scan only when the tunnel's utun output counter moved (`src/iface.rs`); On-Demand tick
+is a dispatch timer on `od_queue` and exists only while On-Demand is on; refresh is driven by
+kqueue watches on the run folder, network prefs and config folder (`src/watch.rs`) with a
+30 s safety timer; icon/tooltip only re-set on change; objc2 features trimmed.
+
+Notes for whoever measures next:
+- Use `bench/idle.sh` (both apps at once); sequential idle numbers swing 2× with system load.
+- The On-Demand poll runs on efficiency cores (App Nap / QoS), where a scan takes ~3–5 ms of
+  CPU time instead of 0.6 ms; compare `instructions` (cpu_probe), not only CPU ms.
+- `wgbar-helper status` says `connected` whenever the peer has an endpoint, and WireGuard
+  learns one by roaming when the server sends a handshake; an armed tunnel can thus show
+  `connected` without WGBar connecting it (seen with wg-monexo-niko). Not a regression.
 
 ## Follow-ups (not parity; decide later)
 
