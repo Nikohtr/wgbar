@@ -161,7 +161,11 @@ Each iteration: pick the first unchecked item, do it, tick it here, commit. Stop
 - [ ] DNS guard: leave VPN DNS behind (`networksetup -setdnsservers Wi-Fi <vpn dns>`), relaunch →
       repaired + notification; Repair DNS alert both ways; wake re-check after 3 s.
 - [ ] `dnsSnapshot` written by the Swift app is read back and restored correctly.
-- [ ] `./sudoers.sh` builds + installs the Rust helper; `install.sh` staleness note goes away.
+- [x] `./sudoers.sh` builds + installs the Rust helper; `install.sh` staleness note goes away.
+      2026-11-07: Rust app installed over the Swift one with `install.sh` (quit the Swift app
+      first: `pkill` would leave an armed interface); it re-armed via the old bash helper (same
+      verbs). `sudoers.sh` then installed the arm64 helper; installed and built `source-hash`
+      match, `sudo -n wgbar-helper status` → armed.
 - [ ] Connect on Demand: arm, connect on RDP/TCP traffic, idle-out, sticky manual connect,
       tunnel switch, quit while armed/connected (interface down, DNS restored).
 - [ ] Check for Updates: up to date / available / install.sh relaunch survives `pkill -x WGBar`.
