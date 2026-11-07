@@ -28,6 +28,33 @@ peer with no endpoint cannot handshake, so the SYN just waits. When WGBar sets t
 endpoint and provokes a handshake, the staged SYN is delivered and the connection
 completes. Nothing fails; the session opens 1 to 2 s later than usual.
 
+### Update 2026-11-07: the armed peer keeps its endpoint
+
+Measured on the user's tunnel: every on-demand connection took 5.1 s, not 1 to 2 s. The
+staged SYN makes wireguard-go call `SendHandshakeInitiation`, which records the attempt
+time *before* it finds there is no endpoint; for `RekeyTimeout` (5 s) after that it skips
+every new attempt, so the endpoint WGBar set ~0.5 s later, the kick ping and the keepalive
+all waited for the 5 s retransmit timer. A peer with an endpoint and no keepalive is just as
+silent while idle, and its first packet handshakes at once (~2 RTT, measured ~60 ms when a
+session already exists). So now:
+
+| State | Peer endpoint | Keepalive | System DNS |
+|---|---|---|---|
+| `armed` | set | off | untouched |
+| `connected` | set | from config | VPN DNS |
+| `paused` | none (held) | – | untouched |
+
+New helper verb `standby` (endpoint set, keepalive off) is used for idle-out, leaving
+`paused`, and re-arming an interface without endpoint at launch; `disconnect` (remove the
+endpoint) only for a manual disconnect while VPN-bound sockets exist. `status` prints
+`off | held | armed | connected` from `wg show <utun> dump` (connected = keepalive on, so a
+config without `PersistentKeepalive` reads as `armed`, and reconcile keeps a `connected`
+state then). The kick ping now only follows a manual connect. Non-TCP traffic into
+`AllowedIPs` also goes through while armed. WGBar refuses to start On-Demand when the
+installed helper's `source-hash` differs from the one it was built with.
+
+The sections below describe the original design.
+
 ## Facts about the target setup (2026-09-02)
 
 - Configs in `/opt/homebrew/etc/wireguard`: `ileasing`, `ileasingiPad`, `ileasingJasmin`,

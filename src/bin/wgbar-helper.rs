@@ -3,15 +3,24 @@
 //! at build time and allows the current user to run this file (and nothing else) via sudo.
 //! Design: docs/superpowers/specs/2026-09-02-on-demand-design.md
 //!
-//! Usage: wgbar-helper arm|connect|disconnect|down|status|print-armed <tunnel>
+//! Usage: wgbar-helper arm|standby|connect|disconnect|down|status|print-armed <tunnel>
 //!        wgbar-helper source-hash
-//!   arm          bring the interface up from the "armed" config (no DNS, no Endpoint)
-//!   connect      give the peer its Endpoint (and PersistentKeepalive) -> traffic flows
-//!   disconnect   take the Endpoint away again; routes stay, packets are held
+//!   arm          bring the interface up from the "armed" config (no DNS, no PersistentKeepalive)
+//!   standby      Endpoint set, keepalive off: silent while idle, the first packet handshakes
+//!   connect      also turn PersistentKeepalive on (in use)
+//!   disconnect   take the Endpoint away ("held"); routes stay, packets wait in wireguard-go
 //!   down         wg-quick down (never touches DNS, since the armed config has none)
-//!   status       print off | armed | connected
+//!   status       print off | held | armed | connected
 //!   print-armed  print the derived armed config (works without root; for tests)
-//!   source-hash  print a hash of this file's source (install.sh uses it to detect a stale helper)
+//!   source-hash  print a hash of this file's source (install.sh and WGBar use it to detect a
+//!                stale helper)
+//!
+//! Why the armed peer keeps its Endpoint: a WireGuard peer with an endpoint and no keepalive
+//! sends nothing while idle, and the first packet into the tunnel starts a handshake at once,
+//! so a connection completes in about two round trips. Without an endpoint that first packet
+//! makes wireguard-go attempt a handshake that fails, and it then refuses new attempts for
+//! RekeyTimeout (5 s): setting the endpoint a moment later did not help, and every on-demand
+//! connection took 5.1 s.
 //!
 //! Every argument is hostile: sudoers lets the user pass any arguments.
 
@@ -43,7 +52,8 @@ const fn fnv1a64(data: &[u8]) -> u64 {
 
 const SOURCE_HASH: u64 = fnv1a64(SOURCE.as_bytes());
 
-const USAGE: &str = "usage: wgbar-helper arm|connect|disconnect|down|status|print-armed <tunnel>";
+const USAGE: &str =
+    "usage: wgbar-helper arm|standby|connect|disconnect|down|status|print-armed <tunnel>";
 
 /// A failed run: exit code plus an optional message for stderr.
 struct Fail(i32, Option<String>);
@@ -121,15 +131,22 @@ fn key_of(line: &[u8]) -> Option<(Vec<u8>, &[u8])> {
     Some((trim(&line[..eq]).to_ascii_lowercase(), &line[eq + 1..]))
 }
 
-/// The armed variant of the real config: every line except DNS, Endpoint and PersistentKeepalive.
+/// The armed variant of the real config: every line except DNS and PersistentKeepalive.
 fn armed_config(data: &[u8]) -> Vec<u8> {
+    config_without(data, &[b"dns", b"persistentkeepalive"])
+}
+
+/// The held variant (`disconnect`): the armed config without Endpoint either.
+fn held_config(data: &[u8]) -> Vec<u8> {
+    config_without(data, &[b"dns", b"persistentkeepalive", b"endpoint"])
+}
+
+/// Every line of `data` except those whose key (lowercase) is in `drop`.
+fn config_without(data: &[u8], drop: &[&[u8]]) -> Vec<u8> {
     let mut out = Vec::new();
     for line in lines(data) {
         if let Some((key, _)) = key_of(line) {
-            if matches!(
-                key.as_slice(),
-                b"dns" | b"endpoint" | b"persistentkeepalive"
-            ) {
+            if drop.contains(&key.as_slice()) {
                 continue;
             }
         }
@@ -222,13 +239,39 @@ impl Ctx {
 
     /// Writes the armed config (0600, in a root-only temp dir) and returns the guard and its path.
     fn make_armed(&self) -> Result<(TempDir, PathBuf), Fail> {
+        self.make_derived(armed_config)
+    }
+
+    /// Writes `derive(config)` as `<tunnel>.conf` (0600) into a root-only temp dir.
+    fn make_derived(&self, derive: fn(&[u8]) -> Vec<u8>) -> Result<(TempDir, PathBuf), Fail> {
         let dir = make_temp_dir()?;
         let path = dir.0.join(format!("{}.conf", self.tunnel));
-        let armed = armed_config(&self.read_conf()?);
+        let derived = derive(&self.read_conf()?);
         let mut f = open_private(&path)?;
-        f.write_all(&armed)
+        f.write_all(&derived)
             .map_err(|e| die(format!("{}: {e}", path.display())))?;
         Ok((dir, path))
+    }
+
+    /// `wg set <iface> peer <PublicKey> endpoint <Endpoint>` from the real config, plus
+    /// `persistent-keepalive` set to `keepalive` (`None`: leave it alone).
+    fn set_peer(&self, keepalive: Option<Vec<u8>>) -> Result<(), Fail> {
+        let iface = self.iface()?;
+        let data = self.read_conf()?;
+        let missing = |what: &str| die(format!("no {what} in {}", self.conf.display()));
+        let pk = field(&data, "publickey").ok_or_else(|| missing("PublicKey"))?;
+        let ep = field(&data, "endpoint").ok_or_else(|| missing("Endpoint"))?;
+        let mut cmd = command(WG);
+        cmd.arg("set")
+            .arg(&iface)
+            .arg("peer")
+            .arg(OsString::from_vec(pk))
+            .arg("endpoint")
+            .arg(OsString::from_vec(ep));
+        if let Some(ka) = keepalive {
+            cmd.arg("persistent-keepalive").arg(OsString::from_vec(ka));
+        }
+        run_tool(cmd)
     }
 }
 
@@ -255,6 +298,26 @@ fn read_iface(namefile: &Path) -> Result<String, Fail> {
     Ok(String::from_utf8_lossy(&data).into_owned())
 }
 
+/// The state shown by `wg show <iface> dump`: `held` if no peer has an endpoint, `connected` if
+/// one with an endpoint has a persistent keepalive, else `armed`.
+fn peer_status(dump: &[u8]) -> &'static str {
+    let mut status = "held";
+    for line in lines(dump).skip(1) {
+        let fields: Vec<&[u8]> = line.split(|&b| b == b'\t').collect();
+        let (Some(endpoint), Some(keepalive)) = (fields.get(2), fields.get(7)) else {
+            continue;
+        };
+        if *endpoint == b"(none)" {
+            continue;
+        }
+        if *keepalive != b"off" {
+            return "connected";
+        }
+        status = "armed";
+    }
+    status
+}
+
 fn valid_tunnel(t: &str) -> bool {
     // Same character set wg-quick accepts for interface names; in particular no "/" or "..".
     (1..=15).contains(&t.len())
@@ -275,7 +338,7 @@ fn run(args: Vec<OsString>) -> Result<(), Fail> {
     }
     if !matches!(
         verb.as_str(),
-        "arm" | "connect" | "disconnect" | "down" | "status" | "print-armed"
+        "arm" | "standby" | "connect" | "disconnect" | "down" | "status" | "print-armed"
     ) {
         return Err(usage());
     }
@@ -320,8 +383,11 @@ fn run(args: Vec<OsString>) -> Result<(), Fail> {
             ctx.need_root()?;
             let wg_fail = || die(format!("wg show failed for {}", ctx.tunnel));
             let iface = read_iface(&ctx.namefile)?;
+            // Peer lines of `wg show <iface> dump`: public key, preshared key, endpoint,
+            // allowed ips, latest handshake, rx, tx, keepalive. (The first line is the
+            // interface's own, private key included; it is skipped and never printed.)
             let output = command(WG)
-                .args(["show", &iface, "endpoints"])
+                .args(["show", &iface, "dump"])
                 .stdin(Stdio::inherit())
                 .stderr(Stdio::inherit())
                 .output()
@@ -329,14 +395,7 @@ fn run(args: Vec<OsString>) -> Result<(), Fail> {
             if !output.status.success() {
                 return Err(wg_fail());
             }
-            // Connected if any peer's endpoint column is not "(none)".
-            let connected = lines(&output.stdout).any(|l| {
-                l.split(|&b| matches!(b, b' ' | b'\t' | b'\n'))
-                    .filter(|f| !f.is_empty())
-                    .nth(1)
-                    .is_some_and(|f| f != b"(none)")
-            });
-            println!("{}", if connected { "connected" } else { "armed" });
+            println!("{}", peer_status(&output.stdout));
             Ok(())
         }
         "arm" => {
@@ -349,25 +408,14 @@ fn run(args: Vec<OsString>) -> Result<(), Fail> {
             cmd.arg("up").arg(&armed);
             run_tool(cmd)
         }
+        "standby" => {
+            ctx.need_root()?;
+            ctx.set_peer(Some(b"off".to_vec()))
+        }
         "connect" => {
             ctx.need_root()?;
-            let iface = ctx.iface()?;
-            let data = ctx.read_conf()?;
-            let missing = |what: &str| die(format!("no {what} in {}", ctx.conf.display()));
-            let pk = field(&data, "publickey").ok_or_else(|| missing("PublicKey"))?;
-            let ep = field(&data, "endpoint").ok_or_else(|| missing("Endpoint"))?;
-            let ka = field(&data, "persistentkeepalive").unwrap_or_default();
-            let mut cmd = command(WG);
-            cmd.arg("set")
-                .arg(&iface)
-                .arg("peer")
-                .arg(OsString::from_vec(pk))
-                .arg("endpoint")
-                .arg(OsString::from_vec(ep));
-            if !ka.is_empty() {
-                cmd.arg("persistent-keepalive").arg(OsString::from_vec(ka));
-            }
-            run_tool(cmd)
+            let ka = field(&ctx.read_conf()?, "persistentkeepalive").filter(|k| !k.is_empty());
+            ctx.set_peer(ka)
         }
         "disconnect" => {
             ctx.need_root()?;
@@ -375,12 +423,12 @@ fn run(args: Vec<OsString>) -> Result<(), Fail> {
             let data = ctx.read_conf()?;
             let pk = field(&data, "publickey")
                 .ok_or_else(|| die(format!("no PublicKey in {}", ctx.conf.display())))?;
-            let (dir, armed) = ctx.make_armed()?;
+            let (dir, held) = ctx.make_derived(held_config)?;
             let stripped = dir.0.join("stripped.conf");
             let mut strip = command(WG_QUICK);
             strip
                 .arg("strip")
-                .arg(&armed)
+                .arg(&held)
                 .stdout(Stdio::from(open_private(&stripped)?));
             run_tool(strip)?;
             let mut remove = command(WG);
@@ -420,5 +468,46 @@ fn main() -> std::process::ExitCode {
             }
             std::process::ExitCode::from(code.clamp(1, 255) as u8)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const IFACE: &str = "priv\tpub\t51820\toff\n";
+
+    #[test]
+    fn peer_status_cases() {
+        let peer =
+            |ep: &str, ka: &str| format!("{IFACE}pk\t(none)\t{ep}\t10.0.0.0/24\t0\t0\t0\t{ka}\n");
+        assert_eq!(peer_status(IFACE.as_bytes()), "held", "no peer");
+        assert_eq!(peer_status(peer("(none)", "off").as_bytes()), "held");
+        assert_eq!(
+            peer_status(peer("(none)", "25").as_bytes()),
+            "held",
+            "keepalive without endpoint"
+        );
+        assert_eq!(
+            peer_status(peer("1.2.3.4:51820", "off").as_bytes()),
+            "armed"
+        );
+        assert_eq!(
+            peer_status(peer("1.2.3.4:51820", "25").as_bytes()),
+            "connected"
+        );
+    }
+
+    #[test]
+    fn derived_configs() {
+        let conf = b"[Interface]\nDNS = 1.1.1.1\n[Peer]\nEndpoint = h:1\nPersistentKeepalive = 25\nAllowedIPs = 10.0.0.0/8\n";
+        assert_eq!(
+            armed_config(conf),
+            b"[Interface]\n[Peer]\nEndpoint = h:1\nAllowedIPs = 10.0.0.0/8\n"
+        );
+        assert_eq!(
+            held_config(conf),
+            b"[Interface]\n[Peer]\nAllowedIPs = 10.0.0.0/8\n"
+        );
     }
 }

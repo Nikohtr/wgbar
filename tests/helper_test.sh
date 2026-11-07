@@ -8,7 +8,7 @@ export WGBAR_CONF_DIR="$PWD/tests/fixtures"
 fail=0
 check() { if [[ "$2" == "$3" ]]; then echo "ok   $1"; else echo "FAIL $1"; echo "  expected: $3"; echo "  actual:   $2"; fail=1; fi; }
 
-check "print-armed drops DNS, Endpoint and PersistentKeepalive" \
+check "print-armed drops DNS and PersistentKeepalive, keeps Endpoint" \
   "$($H print-armed sample 2>&1)" "$(cat tests/fixtures/sample.armed.conf)"
 
 $H print-armed missing >/dev/null 2>&1; check "unknown tunnel exits 1" "$?" "1"
