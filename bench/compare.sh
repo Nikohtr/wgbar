@@ -1,6 +1,6 @@
 #!/bin/bash
-# Swift baseline vs Rust port, on this Mac. Builds the Swift app from a git ref (default `main`)
-# in a temporary worktree and the Rust app from this checkout, measures both the same way, and
+# Swift baseline vs Rust port, on this Mac. Builds the Swift app from a git ref (default c2634d2, the
+# last Swift commit on main) in a temporary worktree and the Rust app from this checkout, measures both the same way, and
 # writes bench/results/<date>-<host>.md.
 #
 # Usage: bench/compare.sh [swift-ref] [idle-seconds]
@@ -12,7 +12,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 export PATH="$HOME/.cargo/bin:$PATH"
-REF="${1:-main}"; IDLE="${2:-60}"
+REF="${1:-c2634d2}"; IDLE="${2:-60}"
 ROOT="$PWD"
 WORK="$(mktemp -d /tmp/wgbar-bench.XXXXXX)"
 OUT="${OUT:-bench/results/$(date +%Y-%m-%d)-$(hostname -s).md}"
