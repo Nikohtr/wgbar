@@ -1,7 +1,7 @@
 //! Resource probe for bench/measure.sh (macOS only).
 //!
 //! Usage: cpu_probe <pid>
-//! Prints `cpu_ns <n>`, `wakeups <n>` and `footprint_kb <n>` for the process, from
+//! Prints `cpu_ns`, `wakeups`, `footprint_kb`, `instructions` and `energy_nj` for the process, from
 //! `proc_pid_rusage(RUSAGE_INFO_V4)`: user+system CPU in nanoseconds (`ps` only resolves 10 ms),
 //! idle + interrupt wakeups (what Activity Monitor's energy impact weighs most for an idle app),
 //! and the physical footprint (Activity Monitor's "Memory" column; RSS also counts shared pages).
@@ -43,6 +43,11 @@ fn main() {
         info.ri_pkg_idle_wkups + info.ri_interrupt_wkups
     );
     println!("footprint_kb {}", info.ri_phys_footprint / 1024);
+    // Frequency-independent work, and the energy the kernel bills the process for (nJ). Work
+    // that macOS runs on efficiency cores takes more CPU time but less energy than on
+    // performance cores, so CPU time alone misjudges it.
+    println!("instructions {}", info.ri_instructions);
+    println!("energy_nj {}", info.ri_billed_energy);
 }
 
 #[cfg(not(target_os = "macos"))]

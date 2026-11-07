@@ -861,3 +861,117 @@ fn cidr_contains_bytes() {
     );
     assert!(cidr("fd00::/8").contains_bytes(&[0xfd, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 5]));
 }
+
+// --- traffic counter gating ---------------------------------------------------
+
+/// Shared test knobs: scans so far, whether VPN traffic is present, the traffic counter.
+type Gate = (Arc<Mutex<u32>>, Arc<Mutex<bool>>, Arc<Mutex<Option<u32>>>);
+
+/// A controller whose socket reads are counted and scripted, with a settable traffic counter.
+fn gated(fx: &Fixture) -> (OnDemandController, Gate) {
+    let mut c = fx.controller();
+    let scans = Arc::new(Mutex::new(0u32));
+    let traffic_present = Arc::new(Mutex::new(false));
+    let counter = Arc::new(Mutex::new(Some(7u32)));
+    let (sc, tp) = (scans.clone(), traffic_present.clone());
+    c.set_socket_reader(Box::new(move |_allowed| {
+        *sc.lock().unwrap() += 1;
+        Some(if *tp.lock().unwrap() {
+            parse_lsof(RDP)
+        } else {
+            vec![]
+        })
+    }));
+    let ct = counter.clone();
+    c.set_traffic_counter(Box::new(move || *ct.lock().unwrap()));
+    (c, (scans, traffic_present, counter))
+}
+
+#[test]
+fn armed_skips_scans_while_nothing_enters_the_tunnel() {
+    let fx = Fixture::new();
+    let (mut c, (scans, _traffic, _counter)) = gated(&fx);
+    assert!(c.arm());
+    c.tick();
+    assert_eq!(*scans.lock().unwrap(), 1, "first armed tick scans");
+    for _ in 0..FULL_SCAN_EVERY - 1 {
+        c.tick();
+    }
+    assert_eq!(
+        *scans.lock().unwrap(),
+        1,
+        "counter unchanged: 9 ticks without a scan"
+    );
+    c.tick();
+    assert_eq!(
+        *scans.lock().unwrap(),
+        2,
+        "but a full scan at least every FULL_SCAN_EVERY ticks"
+    );
+}
+
+#[test]
+fn armed_scans_and_connects_when_the_counter_moves() {
+    let fx = Fixture::new();
+    let (mut c, (scans, traffic, counter)) = gated(&fx);
+    assert!(c.arm());
+    c.tick();
+    c.tick();
+    assert_eq!(*scans.lock().unwrap(), 1);
+    // A SYN goes out of the tunnel interface.
+    *traffic.lock().unwrap() = true;
+    *counter.lock().unwrap() = Some(8);
+    c.tick();
+    assert_eq!(*scans.lock().unwrap(), 2, "moved counter: scan");
+    assert_eq!(c.state(), OnDemandState::Connected);
+}
+
+#[test]
+fn connected_and_unreadable_counter_always_scan() {
+    let fx = Fixture::new();
+    let (mut c, (scans, traffic, counter)) = gated(&fx);
+    assert!(c.arm());
+    *traffic.lock().unwrap() = true;
+    c.tick(); // connects
+    assert_eq!(c.state(), OnDemandState::Connected);
+    for _ in 0..3 {
+        c.tick();
+    }
+    assert_eq!(*scans.lock().unwrap(), 4, "connected: every tick scans");
+
+    // Back to armed with an unreadable counter: no skipping.
+    *traffic.lock().unwrap() = false;
+    fx.advance(31);
+    c.tick(); // idles out
+    assert_eq!(c.state(), OnDemandState::Armed);
+    *counter.lock().unwrap() = None;
+    let before = *scans.lock().unwrap();
+    for _ in 0..3 {
+        c.tick();
+    }
+    assert_eq!(
+        *scans.lock().unwrap(),
+        before + 3,
+        "no counter: every tick scans"
+    );
+}
+
+#[test]
+fn re_armed_tunnel_scans_before_skipping() {
+    let fx = Fixture::new();
+    let (mut c, (scans, traffic, _counter)) = gated(&fx);
+    assert!(c.arm());
+    c.tick(); // empty scan, count 7 remembered
+    *traffic.lock().unwrap() = true;
+    c.manual_toggle(); // sticky connect, no tick
+    *traffic.lock().unwrap() = false;
+    c.manual_toggle(); // disconnect -> armed (quiet)
+    assert_eq!(c.state(), OnDemandState::Armed);
+    let before = *scans.lock().unwrap();
+    c.tick();
+    assert_eq!(
+        *scans.lock().unwrap(),
+        before + 1,
+        "count unchanged, but the remembered quiet count predates the connection"
+    );
+}

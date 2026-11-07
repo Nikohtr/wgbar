@@ -234,6 +234,15 @@ pub type Clock = Arc<dyn Fn() -> SystemTime + Send + Sync>;
 /// itself failed, which must not be mistaken for "no traffic".
 pub type SocketReader = Box<dyn FnMut(&[Cidr]) -> Option<Vec<TcpSocket>> + Send>;
 
+/// A counter of packets sent into the tunnel (see [`OnDemandController::set_traffic_counter`]);
+/// `None` when it cannot be read.
+pub type TrafficCounter = Box<dyn FnMut() -> Option<u32> + Send>;
+
+/// While armed and the traffic counter stands still, the socket scan is skipped, but never
+/// more than this many ticks in a row (a safety net for connections not routed through the
+/// tunnel interface).
+pub const FULL_SCAN_EVERY: u32 = 10;
+
 /// `lsof` via `run`: the portable reader, and the one the controller starts with.
 /// lsof also exits 1 when simply nothing matched `-iTCP`; then it prints nothing (errors always
 /// come with a message on stderr, which `run` merges into `output`), and that is "no traffic".
@@ -268,6 +277,10 @@ pub struct OnDemandController {
     run: Runner,
     now: Clock,
     read_sockets: SocketReader,
+    traffic: Option<TrafficCounter>,
+    /// The traffic count read before the last armed scan that found nothing.
+    quiet_count: Option<u32>,
+    skipped: u32,
 
     state: OnDemandState,
     sticky: bool,
@@ -306,6 +319,9 @@ impl OnDemandController {
             run,
             now,
             read_sockets,
+            traffic: None,
+            quiet_count: None,
+            skipped: 0,
             state: OnDemandState::Off,
             sticky: false,
             last_seen,
@@ -349,11 +365,21 @@ impl OnDemandController {
         self.read_sockets = reader;
     }
 
+    /// A count of packets sent into the tunnel interface. While armed, a new connection into
+    /// AllowedIPs must send its SYN through that interface, so a tick whose count equals the one
+    /// before the last (empty) scan skips the scan: it would find nothing new. At most
+    /// [`FULL_SCAN_EVERY`]` - 1` ticks in a row are skipped. Without a counter every tick scans.
+    pub fn set_traffic_counter(&mut self, counter: TrafficCounter) {
+        self.traffic = Some(counter);
+    }
+
     fn set(&mut self, s: OnDemandState) {
         if s == self.state {
             return;
         }
         self.state = s;
+        // A remembered quiet count belongs to the stretch of armed time it was read in.
+        self.quiet_count = None;
         (self.on_change)(s);
     }
 
@@ -420,10 +446,25 @@ impl OnDemandController {
         if self.state == OnDemandState::Off {
             return;
         }
+        // Read before the scan, so a SYN sent after the scan still moves the count.
+        let count = if self.state == OnDemandState::Armed {
+            self.traffic.as_mut().and_then(|read| read())
+        } else {
+            None
+        };
+        if count.is_some() && count == self.quiet_count && self.skipped + 1 < FULL_SCAN_EVERY {
+            self.skipped += 1;
+            return; // nothing went into the tunnel since the last empty scan
+        }
+        self.skipped = 0;
+        self.quiet_count = None;
         let Some(socks) = self.sockets() else {
             return;
         };
         let has = !socks.is_empty();
+        if !has {
+            self.quiet_count = count;
+        }
         let t = (self.now)();
         if has {
             self.last_seen = t;

@@ -3,6 +3,8 @@
 
 pub mod cmd;
 pub mod dns_guard;
+#[cfg(target_os = "macos")]
+pub mod iface;
 pub mod on_demand;
 #[cfg(target_os = "macos")]
 pub mod proc_sockets;
