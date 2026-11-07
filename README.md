@@ -1,8 +1,8 @@
 # WGBar
 
 ![macOS 13+](https://img.shields.io/badge/macOS-13%2B-black?logo=apple)
-![Swift](https://img.shields.io/badge/Swift-5-F05138?logo=swift&logoColor=white)
-![No dependencies](https://img.shields.io/badge/dependencies-none-success)
+![Rust](https://img.shields.io/badge/Rust-2021-CE422B?logo=rust&logoColor=white)
+![Rust + the objc2 Cocoa bindings](https://img.shields.io/badge/dependencies-objc2-success)
 ![License: MIT](https://img.shields.io/badge/license-MIT-blue)
 
 ![WGBar in the menu bar](docs/menubar.png)
@@ -18,8 +18,8 @@ A tiny macOS menu bar toggle for WireGuard tunnels managed by `wg-quick`
 
 ![Right-click menu](docs/menu.png)
 
-It is about 1,100 lines of Swift with no dependencies beyond Cocoa (`./test.sh` runs the unit tests). It exists because the
-App Store WireGuard app uses its own tunnel stack (not your `wg-quick` configs), and
+It is about 2,900 lines of Rust that use the objc2 Cocoa bindings and `libc` (`./test.sh` runs the
+unit tests and the helper tests). It exists because the App Store WireGuard app uses its own tunnel stack (not your `wg-quick` configs), and
 the other menu bar options are unmaintained.
 
 Beyond the toggle, it solves three things the stock tooling gets wrong on macOS:
@@ -30,14 +30,15 @@ Beyond the toggle, it solves three things the stock tooling gets wrong on macOS:
   address before the handshake exists.
 - **[DNS repair](#dns-left-behind-and-the-fix)** — `wg-quick` leaves VPN DNS servers set system-wide
   when its monitor dies; WGBar detects and reverts that at launch, on wake and on network changes.
-- **[Least-privilege root](#optional-toggle-without-a-password-prompt)** — a 100-line helper plus a
+- **[Least-privilege root](#optional-toggle-without-a-password-prompt)** — a small root helper plus a
   `sudoers.d` rule scoped to your user and the config files that exist, validated with `visudo -c`.
   Falls back to the standard admin dialog if not installed.
 
 ## Requirements
 
 - macOS 13 Ventura or newer (Apple silicon or Intel).
-- Xcode Command Line Tools: `xcode-select --install`
+- Rust, installed with rustup: `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh`
+- Xcode Command Line Tools: `xcode-select --install` (the linker and `codesign` come from them)
 - WireGuard tools from Homebrew: `brew install wireguard-tools`
 - At least one tunnel config (`<name>.conf`) in one of the folders WGBar searches:
   `/opt/homebrew/etc/wireguard`, `/usr/local/etc/wireguard`, `/opt/local/etc/wireguard`
@@ -52,7 +53,7 @@ cd wgbar
 ./install.sh
 ```
 
-`install.sh` compiles the app, copies it to `~/Applications/WGBar.app`, and launches it.
+`install.sh` builds the app with cargo (through `build.sh`), copies it to `~/Applications/WGBar.app`, and launches it.
 On first launch it registers itself as a login item; untick **Launch at Login** in the
 menu if you don't want that.
 
@@ -68,10 +69,12 @@ The app is built on your machine and ad-hoc signed, so there is no Gatekeeper pr
 ./sudoers.sh
 ```
 
-This installs the WGBar helper and writes `/etc/sudoers.d/wgbar` allowing **only your user**
-to run the helper and `wg-quick up/down <path-to-config>` for the tunnel configs that exist
-right now, after validating it with `visudo -c`. It refuses config files your user cannot
-already read. Re-run it after adding a config or changing the config folder
+This compiles the Rust helper (`target/release/wgbar-helper`) with the config folder and the
+`wg-quick` paths baked in at build time, installs it to `/usr/local/libexec/wgbar-helper`, and
+writes `/etc/sudoers.d/wgbar` allowing **only your user** to run the helper and
+`wg-quick up/down <path-to-config>` for the tunnel configs that exist right now, after
+validating it with `visudo -c`. It refuses config files your user cannot already read.
+Re-run it after adding a config, changing the config folder, or updating WGBar
 (`./sudoers.sh /some/other/folder` to point it elsewhere). Remove it with
 `sudo rm /etc/sudoers.d/wgbar /usr/local/libexec/wgbar-helper`.
 
@@ -119,7 +122,7 @@ Requirements:
 
 - A split-tunnel config (specific `AllowedIPs`; the item is disabled for `0.0.0.0/0`).
 - `./sudoers.sh`, which also installs the small root helper WGBar uses for this
-  (`/usr/local/libexec/wgbar-helper`, source in `helper/`). Re-run it after updating WGBar
+  (`/usr/local/libexec/wgbar-helper`, source in `src/bin/wgbar-helper.rs`). Re-run it after updating WGBar
   if `install.sh` says the helper is out of date.
 - Remote machines addressed by IP, or by names your normal DNS resolves to their tunnel
   address. A name that only VPN DNS knows will not trigger the connection yet.
@@ -192,14 +195,23 @@ its settings, the helper and the sudoers rule (if installed).
 
 ## Hacking
 
-The app is `main.swift`; `DNSGuard.swift`, `Updater.swift` and `OnDemand.swift` hold the
-testable parts; `helper/wgbar-helper` is the root helper. `./build.sh` builds
-`build/WGBar.app` without installing; `./install.sh` builds, installs and relaunches.
+The app is `src/main.rs` and `src/app/` (AppKit: menu bar, delegate, settings). `src/dns_guard.rs`,
+`src/updater.rs`, `src/on_demand.rs`, `src/tunnels.rs` and `src/cmd.rs` hold the parts that do not
+touch AppKit, and they are unit-tested on any OS. `src/bin/wgbar-helper.rs` is the root helper.
+`./build.sh` builds `build/WGBar.app` without installing; `./install.sh` builds, installs and relaunches.
 
-`./test.sh` compiles and runs the unit tests (plain Swift, no XCTest, so no Xcode project
-needed) and the helper's shell tests against the fixtures in `tests/fixtures`. The design
+`./test.sh` runs `cargo test` (unit tests in the modules and integration tests in `tests/*.rs`)
+and the helper's shell tests (`tests/helper_test.sh`) against the fixtures in `tests/fixtures`. The design
 notes for on-demand connect — why an armed interface, the state machine, what the helper may
 and may not do — are in [`docs/superpowers/specs/2026-09-02-on-demand-design.md`](docs/superpowers/specs/2026-09-02-on-demand-design.md).
+
+## Benchmarks
+
+`bench/compare.sh` (macOS only) measures the Swift version (built from `main`, or a ref you pass
+as the first argument) against this Rust version. It builds and tests both, then records launch
+time, memory, idle CPU, binary and bundle size, build and test time, and logic micro-benchmarks in
+`bench/results/<date>-<host>.md`. Turn off Connect on Demand first. While the script runs it quits
+your installed WGBar and relaunches it at the end.
 
 ## License
 
