@@ -32,9 +32,10 @@ use wgbar::on_demand::{
 };
 use wgbar::tunnels::{
     any_tunnel_connected, any_tunnel_up, conf_names, network_prefs_modified, run_file,
-    tunnel_address,
+    tunnel_address, NETWORK_PREFS, RUN_DIR,
 };
 use wgbar::updater::{UpdateStatus, Updater};
+use wgbar::watch::{file_id, Watch};
 
 use super::defaults;
 use super::ui::{self, ns};
@@ -86,6 +87,9 @@ pub struct Ivars {
     /// image or tooltip set is relayed to MenuBarAgent, which draws the item.
     shown_icon: Cell<&'static str>,
     shown_tip: RefCell<String>,
+    /// What `refresh` reads, watched for changes (see `sync_watches`); `None` for a path that
+    /// does not exist (yet).
+    watches: RefCell<Vec<(String, Option<Watch>)>>,
 }
 
 define_class!(
@@ -275,6 +279,7 @@ impl AppDelegate {
             tick_timer: RefCell::new(None),
             shown_icon: Cell::new(""),
             shown_tip: RefCell::new(String::new()),
+            watches: RefCell::new(Vec::new()),
         });
         // SAFETY: `init` on an NSObject subclass whose ivars are already set.
         unsafe { msg_send![super(this), init] }
@@ -376,12 +381,14 @@ impl AppDelegate {
         self.refresh();
         // The blocks capture nothing (they reach the delegate through `with_delegate`), so they
         // are trivially sendable; scheduled here, they fire on the main run loop.
+        // File-system events drive `refresh` (see `sync_watches`); this slow timer only catches
+        // what they cannot see, such as a config edited in place (its address is in the tooltip).
         let refresh = RcBlock::new(|_: NonNull<NSTimer>| with_delegate(|d| d.refresh()));
         // SAFETY: the block is sendable (see above). The run loop retains the timer.
         let timer =
-            unsafe { NSTimer::scheduledTimerWithTimeInterval_repeats_block(2.0, true, &refresh) };
+            unsafe { NSTimer::scheduledTimerWithTimeInterval_repeats_block(30.0, true, &refresh) };
         // Let the system coalesce this wakeup with others (Apple suggests >= 10% of the interval).
-        timer.setTolerance(0.5);
+        timer.setTolerance(5.0);
 
         // DNS guard: a reboot or crash with the tunnel up leaves VPN DNS behind; so can waking.
         self.check_dns(false);
@@ -415,6 +422,8 @@ impl AppDelegate {
 
     fn refresh(&self) {
         let iv = self.ivars();
+        // Before reading state: a change after this point is guaranteed to fire an event.
+        self.sync_watches();
         self.sync_tick_timer();
         if iv.tunnel.borrow().is_empty() {
             self.resolve_tunnel();
@@ -433,6 +442,39 @@ impl AppDelegate {
         if (was_up && !is_up) || prefs_now != iv.prefs_seen.get() {
             iv.prefs_seen.set(prefs_now);
             on_main_after(3, |d| d.check_dns(false));
+        }
+    }
+
+    /// Watch what `refresh` reads: the wg-quick run folder (a tunnel going up or down adds or
+    /// removes its `.name` file there; until wg-quick first creates the folder, its parent),
+    /// the network preferences (DNS changes) and the config folder (configs added or removed).
+    /// Re-armed whenever one of them now names a different object, e.g. a replaced file.
+    fn sync_watches(&self) {
+        let run = if Path::new(RUN_DIR).is_dir() {
+            RUN_DIR
+        } else {
+            "/var/run"
+        };
+        let paths = [run.to_string(), NETWORK_PREFS.to_string(), conf_dir()];
+        let mut watches = self.ivars().watches.borrow_mut();
+        let current = watches.len() == paths.len()
+            && watches.iter().zip(&paths).all(|((path, watch), want)| {
+                path == want
+                    && match watch {
+                        Some(w) => w.is_current(want),
+                        None => file_id(want).is_none(),
+                    }
+            });
+        if current {
+            return;
+        }
+        // Drop the old watches first so their fds are released before new ones are opened.
+        watches.clear();
+        for path in paths {
+            let watch = Watch::new(&path, DispatchQueue::main(), || {
+                with_delegate(|d| d.refresh())
+            });
+            watches.push((path, watch));
         }
     }
 

@@ -8,3 +8,5 @@ pub mod on_demand;
 pub mod proc_sockets;
 pub mod tunnels;
 pub mod updater;
+#[cfg(target_os = "macos")]
+pub mod watch;
