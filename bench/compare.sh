@@ -60,6 +60,11 @@ fi
 "$TOOLS/logic_bench" bench/lsof-sample.txt tests/fixtures/sample.conf >> "$RS"
 bench/measure.sh build/WGBar.app "$TOOLS" "$IDLE" >> "$RS"
 
+echo "== side by side idle (3 rounds)"
+bench/idle.sh "$WORK/swift/build/WGBar.app" build/WGBar.app "$TOOLS" "$IDLE" 3 > "$WORK/idle.txt"
+sed -n 's/^a_/sbs_/p' "$WORK/idle.txt" >> "$SW"
+sed -n 's/^b_/sbs_/p' "$WORK/idle.txt" >> "$RS"
+
 mkdir -p bench/results
 {
   echo "# WGBar benchmark — $(date '+%Y-%m-%d %H:%M')"
@@ -68,11 +73,13 @@ mkdir -p bench/results
   echo "Swift: \`$REF\` ($(git rev-parse --short "$REF")), $(swiftc --version 2>&1 | head -1)."
   echo "Rust: \`$(git rev-parse --abbrev-ref HEAD)\` ($(git rev-parse --short HEAD)), $(rustc --version)."
   echo "Idle window: ${IDLE}s. Logic timings are ns per call (median of 7)."
+  echo "sbs_* rows: both apps idle at the same time (bench/idle.sh), median of 3 windows."
   echo
   echo "| metric | Swift | Rust |"
   echo "|---|---:|---:|"
   for k in launch_ms_median launch_ms_min rss_kb_5s "rss_kb_${IDLE}s" footprint_kb_5s "footprint_kb_${IDLE}s" \
-           idle_cpu_ms_per_min wakeups_per_min threads open_fds \
+           idle_cpu_ms_per_min wakeups_per_min sbs_idle_cpu_ms_per_min sbs_wakeups_per_min sbs_footprint_kb \
+           threads open_fds \
            binary_bytes bundle_kb build_s test_s parse_lsof_400 vpn_bound_400 poll_tick_400 parse_config \
            poll_live_ns poll_live_cpu_ns poll_lsof_ns poll_lsof_cpu_ns; do
     echo "| $k | $(val "$SW" "$k") | $(val "$RS" "$k") |"
