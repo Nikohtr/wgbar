@@ -6,6 +6,7 @@ use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::ptr::NonNull;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, SystemTime};
 
@@ -35,7 +36,7 @@ use wgbar::tunnels::{
     tunnel_address, NETWORK_PREFS, RUN_DIR,
 };
 use wgbar::updater::{UpdateStatus, Updater};
-use wgbar::watch::{file_id, Watch};
+use wgbar::watch::{file_id, Ticker, Watch};
 
 use super::defaults;
 use super::ui::{self, ns};
@@ -71,18 +72,19 @@ pub struct Ivars {
     /// Mirror of the controller's state for the main thread (updated via on_change).
     od_state: Cell<OnDemandState>,
     od_tunnel: RefCell<Option<String>>,
-    od_in_flight: Cell<bool>,
     od_queue: DispatchRetained<DispatchQueue>,
     tunnel: RefCell<String>,
     is_up: Cell<bool>,
-    busy: Cell<bool>,
+    /// A start, stop or toggle is in flight. Shared with the On-Demand ticker on `od_queue`,
+    /// which skips its poll meanwhile.
+    busy: SharedFlag,
     /// Services still pointing at VPN DNS that could not be repaired automatically.
     dns_issue: RefCell<Vec<String>>,
     dns_checking: Cell<bool>,
     prefs_seen: Cell<SystemTime>,
-    /// The 1 s On-Demand poll; scheduled only while On-Demand is active, so an idle app is
-    /// woken by the 2 s refresh alone.
-    tick_timer: RefCell<Option<Retained<NSTimer>>>,
+    /// The 1 s On-Demand poll, on `od_queue` (no main-thread wakeup per tick); running only
+    /// while On-Demand is active.
+    tick_timer: RefCell<Option<Ticker>>,
     /// What the status button shows now, so unchanged values are not re-sent: on macOS 27 every
     /// image or tooltip set is relayed to MenuBarAgent, which draws the item.
     shown_icon: Cell<&'static str>,
@@ -217,6 +219,20 @@ define_class!(
     }
 );
 
+/// A flag the main thread sets and a background queue reads.
+#[derive(Default)]
+struct SharedFlag(Arc<AtomicBool>);
+
+impl SharedFlag {
+    fn get(&self) -> bool {
+        self.0.load(Ordering::Relaxed)
+    }
+
+    fn set(&self, value: bool) {
+        self.0.store(value, Ordering::Relaxed);
+    }
+}
+
 /// Lock the controller. Only ever called on `od_queue`, so it never waits on another thread;
 /// a panic there (debug builds only: release aborts) must not wedge the app at quit.
 fn lock(owned: &Mutex<Option<OnDemandController>>) -> MutexGuard<'_, Option<OnDemandController>> {
@@ -268,11 +284,10 @@ impl AppDelegate {
             od_owned: Arc::new(Mutex::new(None)),
             od_state: Cell::new(OnDemandState::Off),
             od_tunnel: RefCell::new(None),
-            od_in_flight: Cell::new(false),
             od_queue: DispatchQueue::new("org.wgbar.ondemand", DispatchQueueAttr::SERIAL),
             tunnel: RefCell::new(String::new()),
             is_up: Cell::new(false),
-            busy: Cell::new(false),
+            busy: SharedFlag::default(),
             dns_issue: RefCell::new(Vec::new()),
             dns_checking: Cell::new(false),
             prefs_seen: Cell::new(network_prefs_modified()),
@@ -766,44 +781,34 @@ impl AppDelegate {
 
     // MARK: On demand
 
-    /// Run the 1 s poll timer exactly while On-Demand is active. Called from `refresh`, which
-    /// follows every On-Demand start, stop and state change.
+    /// Run the 1 s poll exactly while On-Demand is active. Called from `refresh`, which follows
+    /// every On-Demand start and state change, and from `stop_on_demand`.
+    /// The poll runs on `od_queue` itself: serial, so it never overlaps a start, stop or toggle
+    /// queued there, and skipped while one is in flight (`busy`), as the main-thread timer was.
     fn sync_tick_timer(&self) {
-        let mut timer = self.ivars().tick_timer.borrow_mut();
+        let iv = self.ivars();
+        let mut timer = iv.tick_timer.borrow_mut();
         match (self.od_active(), timer.is_some()) {
             (true, false) => {
-                let tick =
-                    RcBlock::new(|_: NonNull<NSTimer>| with_delegate(|d| d.on_demand_tick()));
-                // SAFETY: the block captures nothing, so it is sendable; it fires on the main
-                // run loop, which retains the timer until `invalidate`.
-                let t = unsafe {
-                    NSTimer::scheduledTimerWithTimeInterval_repeats_block(1.0, true, &tick)
-                };
-                t.setTolerance(0.1);
-                *timer = Some(t);
+                let owned = Arc::clone(&iv.od_owned);
+                let busy = Arc::clone(&iv.busy.0);
+                *timer = Some(Ticker::new(
+                    &iv.od_queue,
+                    Duration::from_secs(1),
+                    Duration::from_millis(100),
+                    move || {
+                        if busy.load(Ordering::Relaxed) {
+                            return;
+                        }
+                        if let Some(od) = lock(&owned).as_mut() {
+                            od.tick();
+                        }
+                    },
+                ));
             }
-            (false, true) => {
-                if let Some(t) = timer.take() {
-                    t.invalidate();
-                }
-            }
+            (false, true) => *timer = None,
             _ => {}
         }
-    }
-
-    fn on_demand_tick(&self) {
-        let iv = self.ivars();
-        if !self.od_active() || iv.od_in_flight.get() || iv.busy.get() {
-            return;
-        }
-        iv.od_in_flight.set(true);
-        let owned = Arc::clone(&iv.od_owned);
-        iv.od_queue.exec_async(move || {
-            if let Some(od) = lock(&owned).as_mut() {
-                od.tick();
-            }
-            on_main(|d| d.ivars().od_in_flight.set(false));
-        });
     }
 
     /// After a wake the interface may have changed under us: re-read its real state.
@@ -924,6 +929,7 @@ impl AppDelegate {
         iv.busy.set(true);
         self.update_icon();
         *iv.od_tunnel.borrow_mut() = None;
+        self.sync_tick_timer();
         iv.od_state.set(OnDemandState::Off);
         defaults::set_bool(defaults::ON_DEMAND, false);
         let owned = Arc::clone(&iv.od_owned);

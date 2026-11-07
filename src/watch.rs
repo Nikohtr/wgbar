@@ -1,6 +1,9 @@
-//! File-system change notifications (kqueue vnode events via dispatch sources), so the app
-//! reacts to tunnels going up or down and to network preference changes when they happen,
-//! instead of waking every 2 s to look. macOS only.
+//! Dispatch sources the app is driven by, macOS only:
+//! - [`Watch`]: file-system change notifications (kqueue vnode events), so the app reacts to
+//!   tunnels going up or down and to network preference changes when they happen, instead of
+//!   waking every 2 s to look.
+//! - [`Ticker`]: a repeating timer that fires on a given queue, so the On-Demand poll runs on
+//!   its own serial queue without waking the main thread.
 
 use std::ffi::CString;
 use std::os::unix::fs::MetadataExt;
@@ -9,7 +12,7 @@ use std::ptr::NonNull;
 use block2::RcBlock;
 use dispatch2::{
     dispatch_source_type_t, dispatch_source_vnode_flags_t, DispatchObject, DispatchQueue,
-    DispatchRetained, DispatchSource,
+    DispatchRetained, DispatchSource, DispatchTime,
 };
 
 /// Something on disk to watch: a directory (entries added, removed or renamed) or a file
@@ -89,4 +92,39 @@ impl Drop for Watch {
 
 fn block_ptr(block: &RcBlock<dyn Fn()>) -> dispatch2::dispatch_block_t {
     NonNull::from(&**block).as_ptr()
+}
+
+/// A repeating timer on a dispatch queue; stops when dropped. On a serial queue the handler
+/// never overlaps itself: ticks that fall due while it runs are coalesced into one.
+pub struct Ticker {
+    source: DispatchRetained<DispatchSource>,
+}
+
+impl Ticker {
+    /// Fire `on_tick` on `queue` every `interval`, first after one interval; `leeway` is how
+    /// late the system may fire to batch it with other wakeups.
+    pub fn new(
+        queue: &DispatchQueue,
+        interval: std::time::Duration,
+        leeway: std::time::Duration,
+        on_tick: impl Fn() + Send + 'static,
+    ) -> Ticker {
+        let timer = &raw const dispatch2::_dispatch_source_type_timer as dispatch_source_type_t;
+        // SAFETY: a timer source takes no handle and no mask.
+        let source = unsafe { DispatchSource::new(timer, 0, 0, Some(queue)) };
+        let nanos = |d: std::time::Duration| u64::try_from(d.as_nanos()).unwrap_or(u64::MAX);
+        let start = DispatchTime::NOW.time(i64::try_from(nanos(interval)).unwrap_or(i64::MAX));
+        source.set_timer(start, nanos(interval), nanos(leeway));
+        let tick = RcBlock::new(on_tick);
+        // SAFETY: dispatch copies the block. `on_tick` is Send, as it runs on `queue`.
+        unsafe { source.set_event_handler_with_block(block_ptr(&tick)) };
+        source.activate();
+        Ticker { source }
+    }
+}
+
+impl Drop for Ticker {
+    fn drop(&mut self) {
+        self.source.cancel();
+    }
 }

@@ -75,3 +75,28 @@ fn missing_path_is_none_and_drop_closes_the_fd() {
     assert!(count() <= before + 1, "watch fds are closed on drop");
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+#[test]
+fn ticker_fires_repeatedly_and_stops_on_drop() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use wgbar::watch::Ticker;
+    let queue = DispatchQueue::new("org.wgbar.test.ticker", DispatchQueueAttr::SERIAL);
+    let count = Arc::new(AtomicUsize::new(0));
+    let c = Arc::clone(&count);
+    let ticker = Ticker::new(
+        &queue,
+        Duration::from_millis(20),
+        Duration::ZERO,
+        move || {
+            c.fetch_add(1, Ordering::SeqCst);
+        },
+    );
+    std::thread::sleep(Duration::from_millis(250));
+    drop(ticker);
+    queue.exec_sync(|| {});
+    let fired = count.load(Ordering::SeqCst);
+    assert!(fired >= 5, "about 12 ticks in 250 ms, got {fired}");
+    std::thread::sleep(Duration::from_millis(100));
+    assert_eq!(count.load(Ordering::SeqCst), fired, "no ticks after drop");
+}
