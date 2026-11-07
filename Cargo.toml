@@ -25,10 +25,25 @@ libc = "0.2"
 objc2 = "0.6"
 block2 = "0.6"
 dispatch2 = "0.3"
-objc2-foundation = "0.3"
-objc2-app-kit = "0.3"
-objc2-service-management = "0.3"
-objc2-user-notifications = "0.3"
+# Only the headers WGBar uses: the default "everything" features take most of a clean build.
+objc2-foundation = { version = "0.3", default-features = false, features = [
+    "std", "block2", "NSArray", "NSBundle", "NSDictionary", "NSError", "NSPathUtilities",
+    "NSNotification", "NSValue", "NSObject", "NSOperation", "NSString", "NSTimer", "NSURL",
+    "NSUUID", "NSUserDefaults", "NSDate", "NSEnumerator",
+] }
+objc2-app-kit = { version = "0.3", default-features = false, features = [
+    "std", "block2", "libc", "objc2-core-foundation", "NSAlert", "NSApplication", "NSButton", "NSCell",
+    "NSControl", "NSEvent", "NSImage", "NSMenu", "NSMenuItem", "NSOpenPanel", "NSPanel",
+    "NSResponder", "NSRunningApplication", "NSSavePanel", "NSStatusBar", "NSStatusBarButton",
+    "NSStatusItem", "NSView", "NSWindow", "NSWorkspace",
+] }
+objc2-service-management = { version = "0.3", default-features = false, features = [
+    "std", "objc2", "objc2-foundation", "SMAppService",
+] }
+objc2-user-notifications = { version = "0.3", default-features = false, features = [
+    "std", "block2", "UNNotificationContent", "UNNotificationRequest",
+    "UNUserNotificationCenter", "UNNotificationTrigger",
+] }
 
 [profile.release]
 opt-level = 3
