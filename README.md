@@ -207,11 +207,12 @@ and may not do — are in [`docs/superpowers/specs/2026-09-02-on-demand-design.m
 
 ## Benchmarks
 
-`bench/compare.sh` (macOS only) measures the Swift version (built from `main`, or a ref you pass
-as the first argument) against this Rust version. It builds and tests both, then records launch
-time, memory, idle CPU, binary and bundle size, build and test time, and logic micro-benchmarks in
-`bench/results/<date>-<host>.md`. Turn off Connect on Demand first. While the script runs it quits
-your installed WGBar and relaunches it at the end.
+`bench/compare.sh` (macOS only) measures the original Swift version (built from `c2634d2`, the
+last Swift commit, or a ref you pass as the first argument) against this Rust version. It builds and
+tests both, then records launch time, memory, idle CPU, binary and bundle size, build and test time,
+and logic micro-benchmarks in `bench/results/<date>-<host>.md`. The bench copies run under their own
+bundle id, so an installed WGBar can keep running (even armed); both briefly add a second icon to
+the menu bar.
 
 ## License
 
