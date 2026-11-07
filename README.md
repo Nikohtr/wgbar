@@ -26,8 +26,8 @@ Beyond the toggle, it solves three things the stock tooling gets wrong on macOS:
 
 - **[Connect on demand](#connect-on-demand)** — the tunnel comes up when something opens a
   connection into it and goes down when idle, *without the first connection failing*. Done by
-  keeping the WireGuard interface "armed" (up, routed, no endpoint) so sockets bind the tunnel
-  address before the handshake exists.
+  keeping the WireGuard interface "armed" (up, routed, silent while idle) so sockets bind the
+  tunnel address before the handshake exists; the first packet starts the handshake.
 - **[DNS repair](#dns-left-behind-and-the-fix)** — `wg-quick` leaves VPN DNS servers set system-wide
   when its monitor dies; WGBar detects and reverts that at launch, on wake and on network changes.
 - **[Least-privilege root](#optional-toggle-without-a-password-prompt)** — a small root helper plus a
@@ -104,19 +104,25 @@ defaults delete org.wgbar.WGBar confDir                     # back to auto-detec
 ## Connect on demand
 
 Right-click → **Connect on Demand** keeps the selected tunnel *armed*: the WireGuard
-interface and its routes stay up, but the peer has no endpoint and your DNS is untouched.
-The moment something opens a TCP connection to an address inside the tunnel's `AllowedIPs`
-(an RDP session in the Windows App, ssh to an office box, an internal website), WGBar gives
-the peer its endpoint, applies the config's DNS servers, and the connection goes through.
-Thirty seconds after the last such connection closes, the endpoint is removed and DNS is
-restored. Left-click still works: a manual connect stays up until you click again; a manual
-disconnect pauses auto-connect until the current sessions have gone away.
+interface and its routes stay up, the peer knows its endpoint but has no keepalive (so it sends
+nothing while idle), and your DNS is untouched. The moment something opens a connection to an
+address inside the tunnel's `AllowedIPs` (an RDP session in the Windows App, ssh to an office
+box, an internal website), its first packet starts the WireGuard handshake and the connection
+goes through about one round trip later than usual. Within a second WGBar notices the TCP
+connection, turns the keepalive on and applies the config's DNS servers. Thirty seconds after
+the last such connection closes, keepalive and DNS go back. Left-click still works: a manual
+connect stays up until you click again; a manual disconnect while sessions are open holds the
+tunnel (no endpoint, nothing goes through) until those sessions have gone away.
 
 Why armed rather than down: a socket picks its source address when it connects. If the
 tunnel came up only afterwards, the first attempt would leave with your Wi-Fi address and be
 dropped by the WireGuard server. With the interface already present the socket uses the
-tunnel address, wireguard-go holds the packets until the handshake, and nothing fails; the
-session just opens a second or two later.
+tunnel address, wireguard-go holds the packets until the handshake, and nothing fails.
+
+Why the armed peer keeps its endpoint: earlier versions removed it, and the first packet then
+made wireguard-go attempt a handshake that could not be sent. wireguard-go allows one attempt
+per 5 seconds, so even with the endpoint set a moment later, every on-demand connection took
+5.1 s. With the endpoint kept it takes about two round trips (~100 ms to a server 45 ms away).
 
 Requirements:
 
@@ -188,9 +194,10 @@ its settings, the helper and the sudoers rule (if installed).
 - Login item uses `SMAppService` (hence macOS 13+).
 - Connect on Demand polls `lsof -nP -iTCP` once a second
   (netstat returns an empty list to ad-hoc signed apps on macOS 27) and calls
-  `sudo -n /usr/local/libexec/wgbar-helper arm|connect|disconnect|down|status <tunnel>`;
-  the helper derives an "armed" config (no `DNS`, `Endpoint`, `PersistentKeepalive`) from
-  yours for `wg-quick up`, and uses `wg set` for connect/disconnect. WGBar applies and
+  `sudo -n /usr/local/libexec/wgbar-helper arm|standby|connect|disconnect|down|status <tunnel>`;
+  the helper derives an "armed" config (no `DNS`, no `PersistentKeepalive`) from
+  yours for `wg-quick up`, and uses `wg set` for the rest (keepalive off/on, endpoint removed
+  for a held tunnel). WGBar applies and
   restores DNS itself via `networksetup`.
 
 ## Hacking

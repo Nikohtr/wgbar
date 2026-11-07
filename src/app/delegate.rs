@@ -868,6 +868,9 @@ impl AppDelegate {
         if !OnDemandController::helper_installed() {
             return fail(OnDemandController::NEEDS_HELPER_MESSAGE);
         }
+        if !OnDemandController::helper_current(&runner()) {
+            return fail(OnDemandController::STALE_HELPER_MESSAGE);
+        }
         let Some(text) = read_conf(&tunnel) else {
             return fail(&format!("Could not read {}.", conf_path(&tunnel)));
         };

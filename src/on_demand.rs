@@ -1,6 +1,8 @@
-//! OnDemand — keeps a split-tunnel WireGuard interface "armed" (up, routes installed, peer without
-//! endpoint) and connects it when TCP traffic to its AllowedIPs appears, disconnecting when the
-//! traffic stops. Design: docs/superpowers/specs/2026-09-02-on-demand-design.md
+//! OnDemand — keeps a split-tunnel WireGuard interface "armed" (up, routes installed, peer with
+//! its endpoint but no keepalive, so it is silent while idle and the first packet handshakes at
+//! once) and marks it connected (keepalive and VPN DNS on) when TCP traffic to its AllowedIPs
+//! appears, going back to armed when the traffic stops.
+//! Design: docs/superpowers/specs/2026-09-02-on-demand-design.md
 
 use crate::cmd::Runner;
 use crate::dns_guard::{config_values, split_max1, trim_ws};
@@ -238,6 +240,21 @@ pub type SocketReader = Box<dyn FnMut(&[Cidr]) -> Option<Vec<TcpSocket>> + Send>
 /// `None` when it cannot be read.
 pub type TrafficCounter = Box<dyn FnMut() -> Option<u32> + Send>;
 
+const fn fnv1a64(data: &[u8]) -> u64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    let mut i = 0;
+    while i < data.len() {
+        hash ^= data[i] as u64;
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        i += 1;
+    }
+    hash
+}
+
+/// What `wgbar-helper source-hash` prints (as 16 hex digits) for the helper built from this
+/// checkout: FNV-1a 64 of its source file.
+pub const HELPER_SOURCE_HASH: u64 = fnv1a64(include_str!("bin/wgbar-helper.rs").as_bytes());
+
 /// While armed and the traffic counter stands still, the socket scan is skipped, but never
 /// more than this many ticks in a row (a safety net for connections not routed through the
 /// tunnel interface).
@@ -267,6 +284,7 @@ pub fn native_reader(run: Runner) -> SocketReader {
 }
 
 /// Drives one tunnel through armed ⇄ connected by polling `lsof` and calling the root helper.
+/// Armed already carries traffic (its peer has an endpoint); connected adds keepalive and DNS.
 /// Synchronous; call every method from a single serial queue. Callbacks fire on that queue.
 pub struct OnDemandController {
     tunnel: String,
@@ -296,9 +314,19 @@ impl OnDemandController {
     pub const HELPER_PATH: &'static str = "/usr/local/libexec/wgbar-helper";
     pub const NEEDS_HELPER_MESSAGE: &'static str =
         "On-Demand needs the WGBar helper.\nRun ./sudoers.sh in the WGBar folder and try again.";
+    pub const STALE_HELPER_MESSAGE: &'static str =
+        "The installed WGBar helper is out of date.\nRun ./sudoers.sh in the WGBar folder and try again.";
 
     pub fn helper_installed() -> bool {
         crate::tunnels::is_executable_file(Self::HELPER_PATH)
+    }
+
+    /// Whether the installed helper was built from this app's helper source (its `source-hash`
+    /// matches [`HELPER_SOURCE_HASH`]). An older helper speaks other verbs: with it, a tunnel
+    /// would never go back to armed. Needs no root.
+    pub fn helper_current(run: &Runner) -> bool {
+        let r = run(Self::HELPER_PATH, &["source-hash".to_string()]);
+        r.status == 0 && r.output.trim() == format!("{HELPER_SOURCE_HASH:016x}")
     }
 
     pub fn new(
@@ -407,7 +435,7 @@ impl OnDemandController {
         (self.read_sockets)(&self.allowed)
     }
 
-    /// Bring the interface up without an endpoint. False (and `on_error`) if the helper failed.
+    /// Bring the interface up, armed. False (and `on_error`) if the helper failed.
     pub fn arm(&mut self) -> bool {
         let (ok, output) = self.helper("arm");
         if ok {
@@ -436,9 +464,35 @@ impl OnDemandController {
                 self.last_seen = (self.now)();
                 self.set(OnDemandState::Connected);
             }
-            "armed" => self.set(OnDemandState::Armed),
+            // Armed and a connection without keepalive look the same from outside.
+            "armed" => {
+                if self.state != OnDemandState::Connected {
+                    self.set(OnDemandState::Armed);
+                }
+            }
+            // No endpoint: paused, or armed by an older helper. Only paused stays that way.
+            "held" => {
+                if self.state != OnDemandState::Paused {
+                    if self.state == OnDemandState::Connected {
+                        (self.on_disconnected)();
+                    }
+                    self.standby();
+                }
+            }
             _ => self.set(OnDemandState::Off),
         }
+    }
+
+    /// Endpoint on, keepalive off -> armed. False (state off, `on_error`) if the helper failed.
+    fn standby(&mut self) -> bool {
+        let (ok, output) = self.helper("standby");
+        if ok {
+            self.set(OnDemandState::Armed);
+        } else {
+            self.set(OnDemandState::Off);
+            (self.on_error)(output);
+        }
+        ok
     }
 
     /// One poll: look at the sockets, act on [`decide`]. Skipped (state unchanged) if the read fails.
@@ -471,8 +525,11 @@ impl OnDemandController {
         }
         match decide(self.state, self.sticky, has, self.last_seen, t, self.idle) {
             Some(OnDemandAction::Connect) => self.connect(false),
-            Some(OnDemandAction::Disconnect) => self.disconnect(),
-            Some(OnDemandAction::ResumeArmed) => self.set(OnDemandState::Armed),
+            Some(OnDemandAction::Disconnect) => self.disconnect(false),
+            Some(OnDemandAction::ResumeArmed) => {
+                self.last_seen = t;
+                self.standby();
+            }
             None => {}
         }
     }
@@ -481,7 +538,7 @@ impl OnDemandController {
     pub fn manual_toggle(&mut self) {
         match self.state {
             OnDemandState::Armed | OnDemandState::Paused => self.connect(true),
-            OnDemandState::Connected => self.disconnect(),
+            OnDemandState::Connected => self.disconnect(true),
             OnDemandState::Off => {
                 self.arm();
             }
@@ -513,7 +570,9 @@ impl OnDemandController {
         }
         self.sticky = sticky;
         self.last_seen = (self.now)();
-        if let Some(kick) = &self.kick {
+        // An automatic connect follows a packet that already started the handshake. A click
+        // may come with nothing in flight: ping so the tunnel is up when the user starts.
+        if let (true, Some(kick)) = (sticky, &self.kick) {
             let args: Vec<String> = ["-c", "1", "-W", "1000", kick]
                 .iter()
                 .map(|s| s.to_string())
@@ -524,21 +583,24 @@ impl OnDemandController {
         (self.on_connected)();
     }
 
-    fn disconnect(&mut self) {
+    /// Back to armed (keepalive off, DNS restored). A click while VPN-bound sockets exist holds
+    /// the tunnel instead (endpoint removed, `Paused`), so an app's automatic reconnect cannot
+    /// bring back the tunnel the user just closed.
+    fn disconnect(&mut self, manual: bool) {
         (self.on_disconnected)(); // put DNS back before the tunnel stops answering
-        let (ok, output) = self.helper("disconnect");
         self.sticky = false;
         self.last_seen = (self.now)();
+        let busy = manual && !self.sockets().unwrap_or_default().is_empty();
+        if !busy {
+            self.standby();
+            return;
+        }
+        let (ok, output) = self.helper("disconnect");
         if !ok {
             self.set(OnDemandState::Off);
             (self.on_error)(output);
             return;
         }
-        let quiet = self.sockets().unwrap_or_default().is_empty();
-        self.set(if quiet {
-            OnDemandState::Armed
-        } else {
-            OnDemandState::Paused
-        });
+        self.set(OnDemandState::Paused);
     }
 }

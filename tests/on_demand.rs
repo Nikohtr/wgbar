@@ -481,10 +481,9 @@ fn full_cycle() {
         "SYN_SENT into the tunnel connects"
     );
     assert_eq!(fx.verbs(), ["arm", "connect"], "helper connect called once");
-    assert_eq!(
-        fx.sys.lock().unwrap().pings,
-        ["10.0.0.22"],
-        "handshake kicked with a ping"
+    assert!(
+        fx.sys.lock().unwrap().pings.is_empty(),
+        "no ping: the SYN itself started the handshake (the armed peer has its endpoint)"
     );
     assert_eq!(
         fx.ev.lock().unwrap().connected,
@@ -521,8 +520,8 @@ fn full_cycle() {
     );
     assert_eq!(
         fx.verbs(),
-        ["arm", "connect", "disconnect"],
-        "helper disconnect called"
+        ["arm", "connect", "standby"],
+        "idle-out keeps the endpoint (standby), so the next connection is fast too"
     );
     assert_eq!(
         fx.ev.lock().unwrap().disconnected,
@@ -540,14 +539,8 @@ fn full_cycle() {
     );
     assert_eq!(
         fx.log(),
-        [
-            "arm",
-            "connect",
-            "onConnected",
-            "onDisconnected",
-            "disconnect"
-        ],
-        "DNS restored before helper disconnect"
+        ["arm", "connect", "onConnected", "onDisconnected", "standby"],
+        "DNS restored before helper standby"
     );
 }
 
@@ -618,6 +611,11 @@ fn manual_connect_is_sticky_manual_disconnect_with_live_sockets_pauses() {
         c.state(),
         OnDemandState::Armed,
         "quiet for idle -> armed again"
+    );
+    assert_eq!(
+        fx.verbs(),
+        ["arm", "connect", "disconnect", "standby"],
+        "leaving paused gives the peer its endpoint back"
     );
     fx.set_lsof(SYN);
     c.tick();
@@ -734,7 +732,7 @@ fn manual_toggle_from_off_rearms() {
 #[test]
 fn failing_disconnect_still_restores_dns_and_goes_off() {
     let fx = Fixture::with(|s| {
-        s.helper_fails.insert("disconnect".into());
+        s.helper_fails.insert("standby".into());
     });
     let mut c = fx.controller();
     c.arm();
@@ -802,8 +800,8 @@ fn lsof_exit_1_without_output_is_no_traffic() {
     );
     assert_eq!(
         fx.verbs(),
-        ["arm", "connect", "disconnect"],
-        "disconnect verb called"
+        ["arm", "connect", "standby"],
+        "standby verb called"
     );
 }
 
@@ -973,5 +971,129 @@ fn re_armed_tunnel_scans_before_skipping() {
         *scans.lock().unwrap(),
         before + 1,
         "count unchanged, but the remembered quiet count predates the connection"
+    );
+}
+
+#[test]
+fn manual_connect_kicks_the_handshake() {
+    let fx = Fixture::new();
+    let mut c = fx.controller();
+    c.arm();
+    c.manual_toggle();
+    assert_eq!(c.state(), OnDemandState::Connected);
+    assert_eq!(
+        fx.sys.lock().unwrap().pings,
+        ["10.0.0.22"],
+        "click pings the VPN DNS server"
+    );
+}
+
+#[test]
+fn manual_disconnect_without_sockets_stays_reachable() {
+    let fx = Fixture::new();
+    let mut c = fx.controller();
+    c.arm();
+    c.manual_toggle();
+    fx.set_lsof("");
+    c.manual_toggle();
+    assert_eq!(c.state(), OnDemandState::Armed);
+    assert_eq!(
+        fx.verbs(),
+        ["arm", "connect", "standby"],
+        "standby, not held"
+    );
+}
+
+#[test]
+fn reconcile_held_and_armed() {
+    // An interface armed by an older helper (no endpoint) is re-armed with its endpoint.
+    let fx = Fixture::with(|s| s.status_output = "held".into());
+    let mut c = fx.controller();
+    c.reconcile();
+    assert_eq!(c.state(), OnDemandState::Armed);
+    assert_eq!(fx.verbs(), ["status", "standby"]);
+
+    // Paused stays held.
+    let fx = Fixture::new();
+    let mut c = fx.controller();
+    c.arm();
+    c.manual_toggle();
+    fx.set_lsof(RDP);
+    c.manual_toggle();
+    assert_eq!(c.state(), OnDemandState::Paused);
+    fx.sys.lock().unwrap().status_output = "held".into();
+    c.reconcile();
+    assert_eq!(
+        c.state(),
+        OnDemandState::Paused,
+        "paused is held: nothing to fix"
+    );
+    assert_eq!(fx.verbs().last().map(String::as_str), Some("status"));
+
+    // Connected without a keepalive reads as armed: keep it connected (DNS is applied).
+    let fx = Fixture::with(|s| s.status_output = "armed".into());
+    let mut c = fx.controller();
+    c.arm();
+    fx.set_lsof(SYN);
+    c.tick();
+    assert_eq!(c.state(), OnDemandState::Connected);
+    c.reconcile();
+    assert_eq!(
+        c.state(),
+        OnDemandState::Connected,
+        "armed status does not drop a connection"
+    );
+
+    // Connected but the endpoint is gone: restore DNS, re-arm.
+    fx.sys.lock().unwrap().status_output = "held".into();
+    c.reconcile();
+    assert_eq!(c.state(), OnDemandState::Armed);
+    assert_eq!(fx.ev.lock().unwrap().disconnected, 1, "DNS restored");
+    assert_eq!(fx.verbs().last().map(String::as_str), Some("standby"));
+}
+
+#[test]
+fn failing_resume_goes_off() {
+    let fx = Fixture::with(|s| {
+        s.helper_fails.insert("standby".into());
+    });
+    let mut c = fx.controller();
+    c.arm();
+    c.manual_toggle();
+    fx.set_lsof(RDP);
+    c.manual_toggle();
+    assert_eq!(c.state(), OnDemandState::Paused);
+    fx.set_lsof("");
+    fx.advance(30);
+    c.tick();
+    assert_eq!(c.state(), OnDemandState::Off);
+    assert_eq!(fx.ev.lock().unwrap().errors, ["wg-quick: boom"]);
+}
+
+#[test]
+fn helper_current_compares_source_hash() {
+    let hash = format!("{HELPER_SOURCE_HASH:016x}\n");
+    let ok: Runner = Arc::new(move |exe, args| {
+        assert_eq!(exe, OnDemandController::HELPER_PATH);
+        assert_eq!(args, ["source-hash"]);
+        CmdResult::new(0, hash.clone())
+    });
+    assert!(OnDemandController::helper_current(&ok));
+    let old: Runner = Arc::new(|_, _| CmdResult::new(0, "0123456789abcdef\n"));
+    assert!(!OnDemandController::helper_current(&old));
+    let bash: Runner = Arc::new(|_, _| CmdResult::new(2, "usage: wgbar-helper ..."));
+    assert!(!OnDemandController::helper_current(&bash));
+}
+
+#[test]
+fn built_helper_matches_the_apps_hash() {
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_wgbar-helper"))
+        .arg("source-hash")
+        .output()
+        .unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout).trim(),
+        format!("{HELPER_SOURCE_HASH:016x}"),
+        "the app's copy of the hash agrees with the helper's own"
     );
 }
