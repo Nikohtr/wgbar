@@ -178,4 +178,4 @@ Each iteration: pick the first unchecked item, do it, tick it here, commit. Stop
 - Helper: open the config with O_NOFOLLOW + fstat and cap the read (pre-existing symlink read).
 - Helper: remove the temp dir on SIGTERM/SIGHUP/SIGINT.
 - Configs with CRLF line endings: trim `\r` (Swift and Rust both mis-parse them, differently).
-- `vpn_bound` re-parses every remote IP for every CIDR; parse once per socket if the bench says so.
+- ~~`vpn_bound` re-parses every remote IP for every CIDR~~ — moot: the app now polls with libproc (`src/proc_sockets.rs`), matching raw address bytes.

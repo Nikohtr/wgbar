@@ -28,7 +28,7 @@ use objc2_foundation::{
 use objc2_service_management::{SMAppService, SMAppServiceStatus};
 use wgbar::dns_guard::{config_dns_search, config_dns_servers, DnsGuard, RepairResult};
 use wgbar::on_demand::{
-    is_full_tunnel, parse_allowed_ips, Cidr, OnDemandController, OnDemandState,
+    is_full_tunnel, native_reader, parse_allowed_ips, Cidr, OnDemandController, OnDemandState,
 };
 use wgbar::tunnels::{
     any_tunnel_connected, any_tunnel_up, conf_names, network_prefs_modified, run_file,
@@ -743,6 +743,8 @@ impl AppDelegate {
             runner(),
             Arc::new(SystemTime::now),
         );
+        // In-process libproc scan instead of spawning lsof every tick.
+        od.set_socket_reader(native_reader(runner()));
         // The callbacks run on od_queue.
         let connected_tunnel = tunnel.to_string();
         od.set_on_connected(move || apply_vpn_dns(&connected_tunnel));

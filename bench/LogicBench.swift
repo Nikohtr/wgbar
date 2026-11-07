@@ -10,6 +10,28 @@ func tunnelAddressText(_ text: String) -> String? {
     return nil
 }
 
+/// main.swift's `run`, minus the PATH tweak: what the app pays to spawn lsof.
+func spawn(_ exe: String, _ args: [String]) -> String {
+    let p = Process()
+    p.executableURL = URL(fileURLWithPath: exe)
+    p.arguments = args
+    let pipe = Pipe()
+    p.standardOutput = pipe
+    p.standardError = pipe
+    try! p.run()
+    let data = pipe.fileHandleForReading.readDataToEndOfFile()
+    p.waitUntilExit()
+    return String(decoding: data, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+}
+
+/// CPU (user+sys) of this process and its waited-for children, in ns.
+func cpuNs() -> Double {
+    var a = rusage(), b = rusage()
+    getrusage(RUSAGE_SELF, &a); getrusage(RUSAGE_CHILDREN, &b)
+    func ns(_ t: timeval) -> Double { Double(t.tv_sec) * 1e9 + Double(t.tv_usec) * 1e3 }
+    return ns(a.ru_utime) + ns(a.ru_stime) + ns(b.ru_utime) + ns(b.ru_stime)
+}
+
 @inline(never) func blackHole(_ x: Int) { if x == -1 { print(x) } }
 
 func medianNs(_ iters: Int, _ f: () -> Int) -> Double {
@@ -42,5 +64,13 @@ func medianNs(_ iters: Int, _ f: () -> Int) -> Double {
         print(String(format: "vpn_bound_400 %.0f", bound))
         print(String(format: "poll_tick_400 %.0f", tick))
         print(String(format: "parse_config %.0f", config))
+
+        // One real on-demand poll as the app does it: spawn lsof, parse, filter.
+        let polls = 50
+        let c0 = cpuNs()
+        let live = medianNs(polls / 7 + 1) { vpnBound(parseLsof(spawn("/usr/sbin/lsof", lsofArgs)), allowed).count }
+        let c1 = cpuNs()
+        print(String(format: "poll_live_ns %.0f", live))
+        print(String(format: "poll_live_cpu_ns %.0f", (c1 - c0) / Double(7 * (polls / 7 + 1))))
     }
 }

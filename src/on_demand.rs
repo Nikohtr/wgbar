@@ -138,12 +138,17 @@ impl Cidr {
     }
 
     pub fn contains(&self, ip: &str) -> bool {
-        match ip_bytes(ip) {
-            Some(bytes) if bytes.len() == self.network.len() => {
-                masked(&bytes, self.prefix) == self.network
-            }
-            _ => false,
-        }
+        ip_bytes(ip).is_some_and(|bytes| self.contains_bytes(&bytes))
+    }
+
+    /// [`Cidr::contains`] for an address already in raw form (4 or 16 bytes), without allocating.
+    pub fn contains_bytes(&self, ip: &[u8]) -> bool {
+        ip.len() == self.network.len()
+            && ip.iter().zip(&self.network).enumerate().all(|(i, (&b, &n))| {
+                let bits = self.prefix.saturating_sub(i as u32 * 8).min(8);
+                let mask = if bits == 0 { 0 } else { 0xFFu8 << (8 - bits) };
+                b & mask == n
+            })
     }
 }
 
@@ -221,6 +226,33 @@ pub fn decide(
 /// Wall clock source (injected so tests can move time).
 pub type Clock = Arc<dyn Fn() -> SystemTime + Send + Sync>;
 
+/// Reads the VPN-bound sockets (see [`vpn_bound`]) for the given AllowedIPs; `None` when the read
+/// itself failed, which must not be mistaken for "no traffic".
+pub type SocketReader = Box<dyn FnMut(&[Cidr]) -> Option<Vec<TcpSocket>> + Send>;
+
+/// `lsof` via `run`: the portable reader, and the one the controller starts with.
+/// lsof also exits 1 when simply nothing matched `-iTCP`; then it prints nothing (errors always
+/// come with a message on stderr, which `run` merges into `output`), and that is "no traffic".
+pub fn lsof_reader(run: Runner) -> SocketReader {
+    let args: Vec<String> = LSOF_ARGS.iter().map(|s| s.to_string()).collect();
+    Box::new(move |allowed| {
+        let r = run("/usr/sbin/lsof", &args);
+        if !(r.status == 0 || (r.status == 1 && r.output.is_empty())) {
+            return None;
+        }
+        Some(vpn_bound(&parse_lsof(&r.output), allowed))
+    })
+}
+
+/// The in-process libproc scan ([`crate::proc_sockets`]), falling back to `lsof` via `run`
+/// for a tick on which libproc could not list processes.
+#[cfg(target_os = "macos")]
+pub fn native_reader(run: Runner) -> SocketReader {
+    let mut scanner = crate::proc_sockets::Scanner::new();
+    let mut lsof = lsof_reader(run);
+    Box::new(move |allowed| scanner.vpn_bound(allowed).or_else(|| lsof(allowed)))
+}
+
 /// Drives one tunnel through armed ⇄ connected by polling `lsof` and calling the root helper.
 /// Synchronous; call every method from a single serial queue. Callbacks fire on that queue.
 pub struct OnDemandController {
@@ -231,6 +263,7 @@ pub struct OnDemandController {
     kick: Option<String>,
     run: Runner,
     now: Clock,
+    read_sockets: SocketReader,
 
     state: OnDemandState,
     sticky: bool,
@@ -260,6 +293,7 @@ impl OnDemandController {
         now: Clock,
     ) -> Self {
         let last_seen = now();
+        let read_sockets = lsof_reader(Arc::clone(&run));
         Self {
             tunnel,
             allowed,
@@ -267,6 +301,7 @@ impl OnDemandController {
             kick,
             run,
             now,
+            read_sockets,
             state: OnDemandState::Off,
             sticky: false,
             last_seen,
@@ -305,6 +340,11 @@ impl OnDemandController {
         self.on_change = Box::new(f);
     }
 
+    /// Replace the socket source (default: [`lsof_reader`] over the controller's `run`).
+    pub fn set_socket_reader(&mut self, reader: SocketReader) {
+        self.read_sockets = reader;
+    }
+
     fn set(&mut self, s: OnDemandState) {
         if s == self.state {
             return;
@@ -332,16 +372,9 @@ impl OnDemandController {
         (false, r.output)
     }
 
-    /// `None` when `lsof` itself failed — a failed read must not be mistaken for "no traffic".
-    /// lsof also exits 1 when simply nothing matched `-iTCP`; then it prints nothing (errors always
-    /// come with a message on stderr, which `run` merges into `output`), and that is "no traffic".
-    fn sockets(&self) -> Option<Vec<TcpSocket>> {
-        let args: Vec<String> = LSOF_ARGS.iter().map(|s| s.to_string()).collect();
-        let r = (self.run)("/usr/sbin/lsof", &args);
-        if !(r.status == 0 || (r.status == 1 && r.output.is_empty())) {
-            return None;
-        }
-        Some(vpn_bound(&parse_lsof(&r.output), &self.allowed))
+    /// `None` when the socket read itself failed — that must not be mistaken for "no traffic".
+    fn sockets(&mut self) -> Option<Vec<TcpSocket>> {
+        (self.read_sockets)(&self.allowed)
     }
 
     /// Bring the interface up without an endpoint. False (and `on_error`) if the helper failed.
@@ -378,7 +411,7 @@ impl OnDemandController {
         }
     }
 
-    /// One poll: look at the sockets, act on [`decide`]. Skipped (state unchanged) if `lsof` fails.
+    /// One poll: look at the sockets, act on [`decide`]. Skipped (state unchanged) if the read fails.
     pub fn tick(&mut self) {
         if self.state == OnDemandState::Off {
             return;

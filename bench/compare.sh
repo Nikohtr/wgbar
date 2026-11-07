@@ -73,7 +73,8 @@ mkdir -p bench/results
   echo "|---|---:|---:|"
   for k in launch_ms_median launch_ms_min rss_kb_5s "rss_kb_${IDLE}s" footprint_kb_5s "footprint_kb_${IDLE}s" \
            idle_cpu_ms_per_min wakeups_per_min threads open_fds \
-           binary_bytes bundle_kb build_s test_s parse_lsof_400 vpn_bound_400 poll_tick_400 parse_config; do
+           binary_bytes bundle_kb build_s test_s parse_lsof_400 vpn_bound_400 poll_tick_400 parse_config \
+           poll_live_ns poll_live_cpu_ns poll_lsof_ns poll_lsof_cpu_ns; do
     echo "| $k | $(val "$SW" "$k") | $(val "$RS" "$k") |"
   done
 } | tee "$OUT"
