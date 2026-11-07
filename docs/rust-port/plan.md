@@ -136,13 +136,15 @@ pub fn wg_quick(run: &Runner, wg_quick: &str, brew_bin: &str, action: &str, conf
   found; their small fixes are in. Linux numbers (not comparable to a Mac, for reference only):
   `logic_bench` parse_lsof_400 ≈ 24 µs, vpn_bound_400 ≈ 27 µs, poll_tick_400 ≈ 51 µs,
   parse_config ≈ 0.8 µs.
-- **Phase 2 — waiting for a Mac.**
+- **Phase 2 — in progress on the Mac (started 2026-11-07).**
 
 ## Phase 2 loop (run on the Mac: `/loop` with "continue the WGBar Rust port, phase 2 of docs/rust-port/plan.md")
 
 Each iteration: pick the first unchecked item, do it, tick it here, commit. Stop when all are ticked.
 
-- [ ] `./test.sh` passes on macOS (core tests use real `inet_pton`, temp dirs).
+- [x] `./test.sh` passes on macOS (core tests use real `inet_pton`, temp dirs).
+      2026-11-07, macOS 27 arm64, rustc 1.99.1: 70 Rust tests + 12 helper checks pass;
+      `cargo clippy --all-targets -- -D warnings` clean on the Mac host.
 - [ ] Baseline: Connect on Demand off, then `bench/compare.sh` → `bench/results/*.md` committed.
 - [ ] `cargo build` (debug) app runs from `target/debug/WGBar` without objc2 encoding panics.
 - [ ] Left-click toggles; right-click opens the menu; next left-click toggles again.
