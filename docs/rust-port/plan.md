@@ -149,7 +149,11 @@ Each iteration: pick the first unchecked item, do it, tick it here, commit. Stop
       2026-11-07 (`bench/results/2026-11-07-Nikos-MacBook-Pro.md`): launch median equal (61.4 ms),
       RSS 50.9 vs 54.1 MB, idle CPU 140 vs 170 ms/min, logic 2–23× faster; binary 503 vs 273 KB.
       `launch_probe` rewritten: the status-window check cannot work on macOS 27 (MenuBarAgent).
-- [ ] `cargo build` (debug) app runs from `target/debug/WGBar` without objc2 encoding panics.
+- [x] `cargo build` (debug) app runs from `target/debug/WGBar` without objc2 encoding panics.
+      2026-11-07: launch, 2 s refresh/1 s tick timers, DNS check, status menu and Tunnel
+      submenu opened by hand — no panic, no stderr, no crash report. Note: unbundled, it uses
+      the `WGBar` defaults domain, not `org.wgbar.WGBar`; pre-seed `didRegisterLoginItem` there
+      (`defaults write WGBar didRegisterLoginItem -bool true`) or it registers a login item.
 - [ ] Left-click toggles; right-click opens the menu; next left-click toggles again.
 - [ ] Busy states grey out items now (autoenabling off) — check nothing stays wrongly disabled.
 - [ ] Tunnel submenu (≥2 configs), Config Folder… panel comes to front, choice persists.
