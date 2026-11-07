@@ -4,7 +4,7 @@
 pub mod cmd;
 pub mod dns_guard;
 pub mod on_demand;
-pub mod tunnels;
-pub mod updater;
 #[cfg(target_os = "macos")]
 pub mod proc_sockets;
+pub mod tunnels;
+pub mod updater;

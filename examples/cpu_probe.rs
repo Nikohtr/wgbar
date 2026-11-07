@@ -26,7 +26,10 @@ fn main() {
         )
     };
     if rc != 0 {
-        eprintln!("proc_pid_rusage({pid}): {}", std::io::Error::last_os_error());
+        eprintln!(
+            "proc_pid_rusage({pid}): {}",
+            std::io::Error::last_os_error()
+        );
         std::process::exit(1);
     }
     // Mach absolute time units: 1 ns on Apple silicon, not on Intel; convert to be safe.

@@ -40,8 +40,12 @@ const OFF_FADDR: usize = OFF_TCP + 32;
 const OFF_STATE: usize = OFF_TCP + 80;
 
 extern "C" {
-    fn proc_listpids(kind: u32, typeinfo: u32, buffer: *mut libc::c_void, size: libc::c_int)
-        -> libc::c_int;
+    fn proc_listpids(
+        kind: u32,
+        typeinfo: u32,
+        buffer: *mut libc::c_void,
+        size: libc::c_int,
+    ) -> libc::c_int;
     fn proc_pidinfo(
         pid: libc::c_int,
         flavor: libc::c_int,

@@ -846,9 +846,18 @@ fn helper_failure_without_output_has_default_message() {
 #[test]
 fn cidr_contains_bytes() {
     let c = cidr("10.42.16.0/20");
-    assert!(c.contains_bytes(&[10, 42, 31, 255]), "last address of the /20");
+    assert!(
+        c.contains_bytes(&[10, 42, 31, 255]),
+        "last address of the /20"
+    );
     assert!(!c.contains_bytes(&[10, 42, 32, 0]), "next /20");
-    assert!(!c.contains_bytes(&[0; 16]), "IPv6 bytes never match an IPv4 network");
-    assert!(cidr("0.0.0.0/0").contains_bytes(&[1, 2, 3, 4]), "/0 holds everything");
+    assert!(
+        !c.contains_bytes(&[0; 16]),
+        "IPv6 bytes never match an IPv4 network"
+    );
+    assert!(
+        cidr("0.0.0.0/0").contains_bytes(&[1, 2, 3, 4]),
+        "/0 holds everything"
+    );
     assert!(cidr("fd00::/8").contains_bytes(&[0xfd, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 5]));
 }

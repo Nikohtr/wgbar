@@ -32,7 +32,10 @@ fn finds_own_ipv4_and_ipv6_connections() {
             .iter()
             .any(|s| s.remote_ip == ip && s.remote_port == port && s.state == "ESTABLISHED")
     };
-    assert!(has("127.0.0.1", port4), "client side of the IPv4 pair: {found:?}");
+    assert!(
+        has("127.0.0.1", port4),
+        "client side of the IPv4 pair: {found:?}"
+    );
     assert!(has("::1", port6), "client side of the IPv6 pair: {found:?}");
 }
 
@@ -47,7 +50,9 @@ fn skips_addresses_outside_allowed_and_listeners() {
         "loopback is outside 10.200/16: {found:?}"
     );
     let found = Scanner::new().vpn_bound(&cidrs(&["127.0.0.1/32"])).unwrap();
-    assert!(found.iter().all(|s| s.state == "ESTABLISHED" || s.state == "SYN_SENT"));
+    assert!(found
+        .iter()
+        .all(|s| s.state == "ESTABLISHED" || s.state == "SYN_SENT"));
 }
 
 /// Same answer as the lsof path for this process's own connections (other processes' sockets

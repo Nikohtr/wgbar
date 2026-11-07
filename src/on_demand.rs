@@ -144,11 +144,15 @@ impl Cidr {
     /// [`Cidr::contains`] for an address already in raw form (4 or 16 bytes), without allocating.
     pub fn contains_bytes(&self, ip: &[u8]) -> bool {
         ip.len() == self.network.len()
-            && ip.iter().zip(&self.network).enumerate().all(|(i, (&b, &n))| {
-                let bits = self.prefix.saturating_sub(i as u32 * 8).min(8);
-                let mask = if bits == 0 { 0 } else { 0xFFu8 << (8 - bits) };
-                b & mask == n
-            })
+            && ip
+                .iter()
+                .zip(&self.network)
+                .enumerate()
+                .all(|(i, (&b, &n))| {
+                    let bits = self.prefix.saturating_sub(i as u32 * 8).min(8);
+                    let mask = if bits == 0 { 0 } else { 0xFFu8 << (8 - bits) };
+                    b & mask == n
+                })
     }
 }
 

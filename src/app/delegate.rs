@@ -79,6 +79,13 @@ pub struct Ivars {
     dns_issue: RefCell<Vec<String>>,
     dns_checking: Cell<bool>,
     prefs_seen: Cell<SystemTime>,
+    /// The 1 s On-Demand poll; scheduled only while On-Demand is active, so an idle app is
+    /// woken by the 2 s refresh alone.
+    tick_timer: RefCell<Option<Retained<NSTimer>>>,
+    /// What the status button shows now, so unchanged values are not re-sent: on macOS 27 every
+    /// image or tooltip set is relayed to MenuBarAgent, which draws the item.
+    shown_icon: Cell<&'static str>,
+    shown_tip: RefCell<String>,
 }
 
 define_class!(
@@ -265,6 +272,9 @@ impl AppDelegate {
             dns_issue: RefCell::new(Vec::new()),
             dns_checking: Cell::new(false),
             prefs_seen: Cell::new(network_prefs_modified()),
+            tick_timer: RefCell::new(None),
+            shown_icon: Cell::new(""),
+            shown_tip: RefCell::new(String::new()),
         });
         // SAFETY: `init` on an NSObject subclass whose ivars are already set.
         unsafe { msg_send![super(this), init] }
@@ -367,12 +377,11 @@ impl AppDelegate {
         // The blocks capture nothing (they reach the delegate through `with_delegate`), so they
         // are trivially sendable; scheduled here, they fire on the main run loop.
         let refresh = RcBlock::new(|_: NonNull<NSTimer>| with_delegate(|d| d.refresh()));
-        let tick = RcBlock::new(|_: NonNull<NSTimer>| with_delegate(|d| d.on_demand_tick()));
-        // SAFETY: the blocks are sendable (see above). The run loop retains the timers.
-        unsafe {
-            NSTimer::scheduledTimerWithTimeInterval_repeats_block(2.0, true, &refresh);
-            NSTimer::scheduledTimerWithTimeInterval_repeats_block(1.0, true, &tick);
-        }
+        // SAFETY: the block is sendable (see above). The run loop retains the timer.
+        let timer =
+            unsafe { NSTimer::scheduledTimerWithTimeInterval_repeats_block(2.0, true, &refresh) };
+        // Let the system coalesce this wakeup with others (Apple suggests >= 10% of the interval).
+        timer.setTolerance(0.5);
 
         // DNS guard: a reboot or crash with the tunnel up leaves VPN DNS behind; so can waking.
         self.check_dns(false);
@@ -406,6 +415,7 @@ impl AppDelegate {
 
     fn refresh(&self) {
         let iv = self.ivars();
+        self.sync_tick_timer();
         if iv.tunnel.borrow().is_empty() {
             self.resolve_tunnel();
         }
@@ -457,7 +467,11 @@ impl AppDelegate {
         let Some(button) = self.status_button() else {
             return;
         };
-        button.setImage(ui::symbol(name, description).as_deref());
+        // The description is a function of the name, so the name alone identifies the image.
+        if iv.shown_icon.get() != name {
+            button.setImage(ui::symbol(name, description).as_deref());
+            iv.shown_icon.set(name);
+        }
         let tip = if self.tunnel().is_empty() {
             format!("No WireGuard configs found in {}", conf_dir())
         } else if !dns_issue.is_empty() && !is_up {
@@ -468,7 +482,10 @@ impl AppDelegate {
         } else {
             format!("{} — click to toggle", self.status_text())
         };
-        button.setToolTip(Some(&ns(&tip)));
+        if *iv.shown_tip.borrow() != tip {
+            button.setToolTip(Some(&ns(&tip)));
+            *iv.shown_tip.borrow_mut() = tip;
+        }
     }
 
     /// "ileasing: Connected" etc., shared by the menu status line and the icon tooltip.
@@ -706,6 +723,31 @@ impl AppDelegate {
     }
 
     // MARK: On demand
+
+    /// Run the 1 s poll timer exactly while On-Demand is active. Called from `refresh`, which
+    /// follows every On-Demand start, stop and state change.
+    fn sync_tick_timer(&self) {
+        let mut timer = self.ivars().tick_timer.borrow_mut();
+        match (self.od_active(), timer.is_some()) {
+            (true, false) => {
+                let tick =
+                    RcBlock::new(|_: NonNull<NSTimer>| with_delegate(|d| d.on_demand_tick()));
+                // SAFETY: the block captures nothing, so it is sendable; it fires on the main
+                // run loop, which retains the timer until `invalidate`.
+                let t = unsafe {
+                    NSTimer::scheduledTimerWithTimeInterval_repeats_block(1.0, true, &tick)
+                };
+                t.setTolerance(0.1);
+                *timer = Some(t);
+            }
+            (false, true) => {
+                if let Some(t) = timer.take() {
+                    t.invalidate();
+                }
+            }
+            _ => {}
+        }
+    }
 
     fn on_demand_tick(&self) {
         let iv = self.ivars();
